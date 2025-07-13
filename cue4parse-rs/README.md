@@ -42,6 +42,104 @@ If you want to use the native feature checking:
 3. Configure with CMake: `cmake ..`
 4. Build the library: `cmake --build . --config Release`
 
+## Stove Compatibility & Advanced Features
+
+This crate provides enhanced compatibility with [Stove](https://github.com/bananaturtlesandwich/stove) and other advanced Unreal Engine modding tools. The `unrealmodding-compat` feature includes:
+
+### Core Stove Features
+- **🎮 Static Mesh Processing**: Extract vertex positions, indices, UV coordinates, and material assignments
+- **🎨 Texture Data Access**: Support for DXT, ASTC, BC, and other compression formats
+- **📦 Material Properties**: Parse material parameters, texture references, and shader properties  
+- **🎯 Actor Transforms**: Full support for location, rotation, and scale properties
+- **🔧 Component Hierarchies**: Navigate actor-component relationships and mesh assignments
+
+### Advanced Property Types
+- **Vector Properties**: `Vector`, `Vector2D`, `Vector4`, `Rotator`, `Quat` for 3D transforms
+- **Asset References**: `SoftObjectPath`, `SoftClassPath` for cross-asset dependencies
+- **Per-Platform Data**: `PerPlatformBool`, `PerPlatformInt`, `PerPlatformFloat` for multi-target games
+- **Specialized Types**: `LinearColor`, `Transform`, `Guid`, `DateTime`, `Delegate` properties
+- **Material Types**: `MaterialInterface`, `StaticMesh`, `Texture2D` object references
+
+### Example Usage (Stove-style)
+
+```rust
+use cue4parse_rs::{Provider, GameVersion};
+use cue4parse_rs::unreal_asset::{Asset, UnrealAssetCompat, AdvancedAssetProcessing, ConversionUtils};
+
+// Load a level for editing (like Stove does)
+let provider = Provider::new("/path/to/game", GameVersion::UE5_3);
+let level_asset = Asset::from_cue4parse(&provider, "World'/Game/Maps/MainLevel.MainLevel'")?;
+
+// Extract all actors with transforms (core Stove functionality)
+let actors = level_asset.extract_actors()?;
+for actor in actors {
+    println!("Actor: {} at location ({:.1}, {:.1}, {:.1})", 
+             actor.name, 
+             actor.transform.location.x,
+             actor.transform.location.y, 
+             actor.transform.location.z);
+    
+    // Find associated mesh (for 3D rendering)
+    if let Some(mesh_path) = ConversionUtils::find_mesh_component(&level_asset, &export) {
+        let mesh_asset = Asset::from_cue4parse(&provider, &mesh_path)?;
+        let mesh_data = mesh_asset.extract_static_mesh()?;
+        
+        // Render mesh with vertices and materials...
+    }
+}
+
+// Load and process a static mesh (for visualization)
+let mesh_asset = Asset::from_cue4parse(&provider, "StaticMesh'/Game/Meshes/SM_Rock.SM_Rock'")?;
+if let Some(mesh_data) = mesh_asset.extract_static_mesh()? {
+    println!("Mesh has {} vertices and {} triangles", 
+             mesh_data.vertex_count(), mesh_data.triangle_count());
+    
+    // Access vertex data for rendering
+    for vertex in &mesh_data.vertices {
+        // vertex.x, vertex.y, vertex.z
+    }
+    
+    // Access UV coordinates
+    if let Some(uvs) = mesh_data.get_uv_channel(0) {
+        for uv in uvs {
+            // uv.x, uv.y
+        }
+    }
+}
+
+// Load texture with format support (like Stove does)
+let texture_asset = Asset::from_cue4parse(&provider, "Texture2D'/Game/Textures/T_Rock.T_Rock'")?;
+if let Some(texture_data) = texture_asset.extract_texture_data()? {
+    match texture_data.format.as_str() {
+        "PF_DXT1" => println!("BC1 compressed texture"),
+        "PF_DXT5" => println!("BC3 compressed texture"),
+        "PF_ASTC_4x4" => println!("ASTC mobile texture"),
+        _ => println!("Other format: {}", texture_data.format),
+    }
+}
+```
+
+### Migration from unreal_asset
+
+The compatibility layer provides a seamless migration path:
+
+```rust
+// Before (unreal_asset)
+use unreal_asset::{Asset, read};
+let asset = read(&mut reader, &engine_version, None)?;
+
+// After (CUE4Parse with compatibility)
+use cue4parse_rs::unreal_asset::{Asset, UnrealAssetCompat};
+let asset = Asset::from_cue4parse(&provider, "MyAsset.MyAsset")?;
+
+// Same API, enhanced capabilities!
+```
+
+Run the Stove compatibility example:
+```bash
+cargo run --example stove_compat --features unrealmodding-compat
+```
+
 ## Usage
 
 Add this to your `Cargo.toml`:

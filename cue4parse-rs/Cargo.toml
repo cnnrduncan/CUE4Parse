@@ -50,3 +50,8 @@ path = "examples/basic_usage.rs"
 name = "unreal_asset_compat"
 path = "examples/unreal_asset_compat.rs"
 required-features = ["unrealmodding-compat"]
+
+[[example]]
+name = "stove_compat"
+path = "examples/stove_compat.rs"
+required-features = ["unrealmodding-compat"]
