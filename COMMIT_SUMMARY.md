@@ -19,7 +19,15 @@ This commit introduces comprehensive Rust FFI bindings for CUE4Parse, enabling s
 - **Comprehensive options**: Support for encryption keys, mappings, multiple formats
 - **Cross-platform**: Works on all platforms where .NET 8 runs
 
-### 3. Build Infrastructure
+### 3. Unreal Asset Compatibility Layer (NEW)
+- **Migration support**: Optional `unrealmodding-compat` feature for seamless migration
+- **API compatibility**: Drop-in replacement types for `unreal_asset` module
+- **Property system**: Complete property type support (Bool, Int, String, Struct, Array, Map, Enum, Text)
+- **Conversion utilities**: Tools for transforming CUE4Parse JSON to `unreal_asset` format
+- **Helper macros**: `load_asset!` and `get_property!` for easier code migration
+- **Migration guide**: Complete documentation for users switching from `unreal_modding`
+
+### 4. Build Infrastructure
 - **PowerShell build script**: `build.ps1` for easy setup and building
 - **CMake integration**: Native library building with optional features
 - **Cargo integration**: Proper Rust package with features and dependencies
@@ -33,6 +41,7 @@ This commit introduces comprehensive Rust FFI bindings for CUE4Parse, enabling s
 ✅ **Documentation**: Comprehensive docs with examples
 ✅ **Testing**: Unit tests and integration examples
 ✅ **Flexible**: Support for different UE versions, encryption, mappings
+✅ **Migration Ready**: Optional compatibility layer for `unreal_modding` users
 
 ## API Highlights
 

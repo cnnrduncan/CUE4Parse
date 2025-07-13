@@ -8,7 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial Rust FFI bindings for CUE4Parse
+- **Unreal Asset Compatibility Layer**: New `unrealmodding-compat` feature that provides compatibility with the `unreal_asset` module from the `unreal_modding` crate
+  - Compatible `Asset`, `AssetData`, `Export`, `Import`, `Property`, `FName`, and `PackageIndex` structures
+  - `UnrealAssetCompat` trait for converting CUE4Parse data to `unreal_asset`-compatible formats
+  - `ConversionUtils` for type conversion and property mapping
+  - Helper macros (`load_asset!`, `get_property!`) for easier migration
+  - Comprehensive property type support (Bool, Int32, String, Struct, Array, Map, Enum, Text, etc.)
+  - Complete migration guide and documentation in `UNREAL_ASSET_MIGRATION.md`
+  - Integration tests covering all compatibility features
+  - Example demonstrating migration from `unreal_modding` to CUE4Parse
+- Enhanced documentation with migration examples and API compatibility information
 - Process-based communication with CUE4Parse.CLI tool
 - Safe Rust API with comprehensive error handling
 - Support for all Unreal Engine versions (UE4.0 to UE5.5)
@@ -19,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform support (Windows, macOS, Linux)
 - Comprehensive documentation with examples
 - Build script for easy setup (`build.ps1`)
+- **NEW**: `unrealmodding-compat` feature for seamless migration from `unreal_modding` crate
+- **NEW**: Complete API compatibility layer with `unreal_asset` module structures
+- **NEW**: Migration guide and examples for `unreal_modding` users
+- **NEW**: Property conversion system for JSON-to-Property transformation
+- **NEW**: Helper macros and utilities for easy migration
+- **NEW**: Integration tests for compatibility layer
 
 ### Features
 - `Provider` struct for managing game asset access

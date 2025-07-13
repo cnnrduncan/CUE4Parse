@@ -49,7 +49,33 @@ Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
 cue4parse-rs = { path = "path/to/cue4parse-rs" }
+
+# For unreal_asset compatibility
+cue4parse-rs = { path = "path/to/cue4parse-rs", features = ["unrealmodding-compat"] }
 ```
+
+### Migrating from unreal_modding
+
+If you're migrating from the `unreal_modding` crate, enable the compatibility feature:
+
+```rust
+use cue4parse_rs::{Provider, GameVersion};
+use cue4parse_rs::unreal_asset::{Asset, UnrealAssetCompat};
+
+let provider = Provider::new("/path/to/game", GameVersion::UE5_3);
+let asset = Asset::from_cue4parse(&provider, "MyAsset.MyAsset")?;
+
+// Use familiar unreal_asset APIs
+println!("Asset: {}", asset.asset_data.object_name);
+for export in &asset.asset_data.exports {
+    println!("Export: {}", export.object_name);
+    for (name, property) in &export.properties {
+        println!("  Property {}: {:?}", name, property);
+    }
+}
+```
+
+See [UNREAL_ASSET_MIGRATION.md](UNREAL_ASSET_MIGRATION.md) for a complete migration guide.
 
 ### Basic Example
 
@@ -139,6 +165,7 @@ This crate supports the following optional features:
 
 - `native-lib` - Enable native library bindings for feature checking (default: enabled)
 - `dotnet-interop` - Enable direct .NET interop (experimental, default: disabled)
+- `unrealmodding-compat` - Enable compatibility layer for `unreal_modding` crate migration (default: disabled)
 
 To build with specific features:
 

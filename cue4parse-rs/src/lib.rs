@@ -60,6 +60,7 @@
 //! ```no_run
 //! use cue4parse_rs::{Provider, GameVersion, CUE4ParseError};
 //!
+//! let provider = Provider::new("/path/to/game", GameVersion::UE5_3);
 //! match provider.load_package("invalid/path") {
 //!     Ok(package) => println!("Loaded package: {:?}", package),
 //!     Err(CUE4ParseError::ProcessFailed(msg)) => {
@@ -69,11 +70,17 @@
 //! }
 //! ```
 
-use std::ffi::{CStr, CString};
 use std::process::Command;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[cfg(feature = "native-lib")]
+use std::ffi::{CStr, CString};
+
+// Re-export compatibility modules when features are enabled
+#[cfg(feature = "unrealmodding-compat")]
+pub mod unreal_asset;
 
 #[cfg(feature = "native-lib")]
 mod native {
@@ -351,7 +358,7 @@ pub struct PackageInfo {
 /// ```
 pub struct Provider {
     /// Internal configuration for the provider
-    config: ProviderConfig,
+    pub(crate) config: ProviderConfig,
     /// Path to the CUE4Parse CLI executable
     cue4parse_exe: PathBuf,
 }
