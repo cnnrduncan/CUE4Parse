@@ -54,6 +54,15 @@ Our compatibility layer fully supports all Stove requirements analyzed from http
 - ✅ Component transform access
 - ✅ Property type conversion utilities
 
+#### .usmap Mapping Support (Critical for Cooked Builds)
+- ✅ `AssetData::load_with_mappings()` - Load assets with .usmap files
+- ✅ `ConversionUtils::load_asset_with_mappings()` - Enhanced loading
+- ✅ `suggest_usmap_paths()` - Automatic .usmap discovery
+- ✅ `validate_asset_types()` - Verify proper type resolution
+- ✅ `has_type_mappings()` - Check mapping availability
+- ✅ Enhanced property conversion with mapping context
+- ✅ Support for cooked builds where type info is stripped
+
 ### ✅ unrealmodding/unreal_asset Compatibility
 
 Our compatibility layer provides full API compatibility with https://github.com/AstroTechies/unrealmodding:

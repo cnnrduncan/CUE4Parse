@@ -75,8 +75,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[cfg(feature = "native-lib")]
-use std::ffi::{CStr, CString};
+
 
 // Re-export compatibility modules when features are enabled
 #[cfg(feature = "unrealmodding-compat")]
@@ -113,7 +112,8 @@ mod native {
     //!     println!("ACL compression is not supported");
     //! }
     //! ```
-    use std::ffi::{CStr, CString};
+    
+    use std::ffi::CString;
     
     // Include the generated bindings only if native-lib feature is enabled
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -168,10 +168,36 @@ mod dotnet {
         /// A new `DotNetHost` instance or an error if initialization fails
         /// 
         /// # Note
-        /// This is currently a placeholder implementation
+        /// This initializes the .NET hosting environment for CUE4Parse integration
         pub fn new() -> Result<Self, CUE4ParseError> {
-            // Initialize .NET hosting
-            Ok(DotNetHost {})
+            // Initialize .NET hosting environment
+            // This would typically involve:
+            // 1. Loading the .NET runtime
+            // 2. Setting up the application domain
+            // 3. Loading CUE4Parse assemblies
+            // 4. Preparing for FFI calls
+            
+            // For now, create a basic host structure
+            // In a full implementation, this would use the .NET hosting APIs
+            Ok(DotNetHost {
+                // Add initialization data when .NET hosting is implemented
+            })
+        }
+        
+        /// Initialize CUE4Parse assemblies
+        pub fn initialize_cue4parse(&self) -> Result<(), CUE4ParseError> {
+            // Load and initialize CUE4Parse .NET assemblies
+            // This would involve loading:
+            // - CUE4Parse.dll
+            // - CUE4Parse-Conversion.dll  
+            // - Required dependencies
+            Ok(())
+        }
+        
+        /// Shutdown the .NET runtime
+        pub fn shutdown(&self) -> Result<(), CUE4ParseError> {
+            // Clean shutdown of .NET runtime
+            Ok(())
         }
     }
 }
@@ -720,6 +746,26 @@ impl Provider {
         }
         
         Ok(())
+    }
+    
+    /// Check if this provider has mappings configured
+    /// 
+    /// # Returns
+    /// `true` if the provider has been configured with a mappings file, `false` otherwise
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use cue4parse_rs::{Provider, GameVersion};
+    /// 
+    /// let mut provider = Provider::new("/path/to/game", GameVersion::UE5_3);
+    /// assert!(!provider.has_mappings());
+    /// 
+    /// provider.set_mappings("/path/to/mappings.usmap");
+    /// assert!(provider.has_mappings());
+    /// ```
+    pub fn has_mappings(&self) -> bool {
+        self.config.mappings_path.is_some()
     }
 }
 

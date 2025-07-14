@@ -175,7 +175,7 @@ mod compatibility_tests {
     
     #[test]
     fn test_asset_structure_compatibility() {
-        let asset = Asset::new();
+        let asset: Asset<std::io::Cursor<Vec<u8>>> = Asset::new();
         
         // Test default values
         assert_eq!(asset.asset_data.object_name, "");
@@ -214,6 +214,7 @@ mod compatibility_tests {
             serial_size: 1024,
             serial_offset: 512,
             export_flags: 0x00000001,
+            create_before_serialization_dependencies: Vec::new(),
             properties,
             extras: Some(json!({"custom_data": "test"})),
         };
@@ -238,6 +239,7 @@ mod compatibility_tests {
             class_name: FName::new("Class"),
             outer_index: PackageIndex::null(),
             object_name: FName::new("TestClass"),
+            package_name: FName::new("TestPackage"),
             package_guid: Some(uuid::Uuid::new_v4()),
         };
         
@@ -254,15 +256,15 @@ mod compatibility_tests {
     fn test_json_to_property_conversion() {
         // Test basic JSON to Property conversion
         let bool_json = json!(true);
-        let prop = Asset::json_to_property(&bool_json, None);
+        let prop = Asset::<std::io::Cursor<Vec<u8>>>::json_to_property(&bool_json, None);
         assert!(matches!(prop, Property::Bool(true)));
         
         let number_json = json!(42);
-        let prop = Asset::json_to_property(&number_json, None);
+        let prop = Asset::<std::io::Cursor<Vec<u8>>>::json_to_property(&number_json, None);
         assert!(matches!(prop, Property::Int32(42)));
         
         let large_number_json = json!(9223372036854775807i64);
-        let prop = Asset::json_to_property(&large_number_json, None);
+        let prop = Asset::<std::io::Cursor<Vec<u8>>>::json_to_property(&large_number_json, None);
         assert!(matches!(prop, Property::Int64(9223372036854775807)));
         
         let float_json = json!(3.14159);
@@ -398,7 +400,7 @@ mod compatibility_tests {
     fn test_asset_helper_methods() {
         use indexmap::IndexMap;
         
-        let mut asset = Asset::new();
+        let mut asset: Asset<std::io::Cursor<Vec<u8>>> = Asset::new();
         
         // Add some test exports
         let mut props1 = IndexMap::new();
@@ -414,6 +416,7 @@ mod compatibility_tests {
             serial_size: 0,
             serial_offset: 0,
             export_flags: 0,
+            create_before_serialization_dependencies: Vec::new(),
             properties: props1,
             extras: None,
         };
@@ -431,6 +434,7 @@ mod compatibility_tests {
             serial_size: 0,
             serial_offset: 0,
             export_flags: 0,
+            create_before_serialization_dependencies: Vec::new(),
             properties: props2,
             extras: None,
         };
@@ -457,6 +461,7 @@ mod compatibility_tests {
             class_name: FName::new("Class"),
             outer_index: PackageIndex::null(),
             object_name: FName::new("TestImport1"),
+            package_name: FName::new("TestPackage"),
             package_guid: None,
         };
         

@@ -25,6 +25,12 @@ serde = { version = "1.0.195", features = ["derive"] }
 serde_json = "1.0.111"
 uuid = { version = "1.6", features = ["serde", "v4"], optional = true }
 indexmap = { version = "2.1", features = ["serde"], optional = true }
+bitflags = { version = "2.4", features = ["serde"], optional = true }
+byteorder = { version = "1.5", optional = true }
+fnv = { version = "1.0", optional = true }
+crc = { version = "3.0", optional = true }
+xxhash-rust = { version = "0.8", features = ["xxh64"], optional = true }
+lru = { version = "0.12", optional = true }
 
 [build-dependencies]
 bindgen = "0.69.4"
@@ -40,7 +46,7 @@ crate-type = ["lib"]
 default = ["native-lib"]
 native-lib = []
 dotnet-interop = ["netcorehost"]
-unrealmodding-compat = ["uuid", "indexmap"]
+unrealmodding-compat = ["uuid", "indexmap", "bitflags", "byteorder", "fnv", "crc", "xxhash-rust", "lru"]
 
 [[example]]
 name = "basic_usage"
@@ -54,4 +60,9 @@ required-features = ["unrealmodding-compat"]
 [[example]]
 name = "stove_compat"
 path = "examples/stove_compat.rs"
+required-features = ["unrealmodding-compat"]
+
+[[example]]
+name = "phase3_demo"
+path = "examples/phase3_demo.rs"
 required-features = ["unrealmodding-compat"]

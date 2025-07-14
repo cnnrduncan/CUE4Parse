@@ -15,8 +15,8 @@ use cue4parse_rs::{Provider, GameVersion, Result};
 
 #[cfg(feature = "unrealmodding-compat")]
 use cue4parse_rs::unreal_asset::{
-    Asset, UnrealAssetCompat, Property, FName, ConversionUtils, AdvancedAssetProcessing,
-    Vector, Vector2D, Vector4, Rotator, Quat, LinearColor, Transform, SoftObjectPath,
+    Asset, UnrealAssetCompat, Property, ConversionUtils, AdvancedAssetProcessing,
+    Vector, Vector2D, Rotator, Quat, LinearColor, Transform, SoftObjectPath,
     StaticMeshData, Texture2DData, MaterialData, ActorData
 };
 
@@ -437,6 +437,12 @@ fn property_type_name(property: &Property) -> &'static str {
         Property::Set(_) => "Set",
         Property::ByteEnum { .. } => "ByteEnum",
         Property::Byte(_) => "Byte",
+        Property::MaterialInstance(_) => "MaterialInstance",
+        Property::LevelSequence(_) => "LevelSequence",
+        Property::ComponentReference(_) => "ComponentReference",
+        Property::Blueprint(_) => "Blueprint",
+        Property::WorldContext(_) => "WorldContext",
+        Property::LandscapeComponent(_) => "LandscapeComponent",
         Property::Unknown(_) => "Unknown",
     }
 }
