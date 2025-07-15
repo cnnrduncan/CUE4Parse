@@ -279,6 +279,9 @@ impl PackageIndex {
     }
 }
 
+#[cfg(feature = "unrealmodding-compat")]
+// ...existing code...
+
 /// Trait for types that can work with PackageIndex
 #[cfg(feature = "unrealmodding-compat")]
 pub trait PackageIndexTrait {
@@ -2587,7 +2590,7 @@ pub enum Error {
 #[cfg(feature = "unrealmodding-compat")]
 impl Error {
     /// Create a NoData error (Stove compatibility)
-    pub fn no_data() -> Self {
+    pub fn no_data(message: String) -> Self {
         Error::NoData
     }
     
@@ -2854,6 +2857,16 @@ impl ToSerializedName for FName {
             self.name.clone()
         } else {
             format!("{}_{}", self.name, self.number)
+        }
+    }
+}
+
+#[cfg(feature = "unrealmodding-compat")]
+impl Default for FName {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            number: 0,
         }
     }
 }
@@ -3131,27 +3144,17 @@ impl SoftObjectPath {
 /// Array property compatible with original unreal_asset
 #[cfg(feature = "unrealmodding-compat")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArrayProperty {
-    pub array_type: String,
-    pub values: Vec<Property>,
-}
+pub struct ArrayProperty(pub String, pub Vec<Property>);
 
 /// Map property compatible with original unreal_asset
 #[cfg(feature = "unrealmodding-compat")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MapProperty {
-    pub key_type: String,
-    pub value_type: String,
-    pub entries: Vec<(Property, Property)>,
-}
+pub struct MapProperty(pub String, pub String, pub Vec<(Property, Property)>);
 
 /// Set property compatible with original unreal_asset
 #[cfg(feature = "unrealmodding-compat")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetProperty {
-    pub element_type: String,
-    pub values: Vec<Property>,
-}
+pub struct SetProperty(pub String, pub Vec<Property>);
 
 /// Struct property compatible with original unreal_asset
 #[cfg(feature = "unrealmodding-compat")]
