@@ -40,6 +40,10 @@ use uuid::Uuid;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+// Conditional serde_json import for JSON handling
+#[cfg(feature = "unrealmodding-compat")]
+use serde_json;
+
 // Hash algorithm imports for Phase 3
 #[cfg(feature = "unrealmodding-compat")]
 use fnv::FnvHasher;
@@ -480,28 +484,6 @@ impl<'a> PackageIndexResolver<'a> {
         
         Ok(graph)
     }
-} 
-                outer_index, 
-                .. 
-            } => {
-                if !class_index.is_null() {
-                    dependencies.push(class_index);
-                }
-                if !super_index.is_null() {
-                    dependencies.push(super_index);
-                }
-                if !template_index.is_null() {
-                    dependencies.push(template_index);
-                }
-                if !outer_index.is_null() {
-                    dependencies.push(outer_index);
-                }
-            }
-            ObjectReference::Null => {}
-        }
-        
-        Ok(dependencies)
-    }
     
     /// Find objects by name pattern
     pub fn find_objects_by_name(&self, pattern: &str) -> Vec<(PackageIndex, ObjectReference)> {
@@ -559,54 +541,6 @@ impl<'a> PackageIndexResolver<'a> {
         results
     }
     
-    /// Validate that all package indices in the asset are valid
-    pub fn validate_all_indices(&self, asset: &Asset) -> Vec<UnrealAssetError> {
-        let mut errors = Vec::new();
-        
-        // Validate import outer indices
-        for (i, import) in self.imports.iter().enumerate() {
-            if !import.outer_index.is_null() {
-                if let Err(e) = self.resolve(import.outer_index) {
-                    errors.push(UnrealAssetError::new(&format!(
-                        "Invalid outer index in import {}: {}", i, e
-                    )));
-                }
-            }
-        }
-        
-        // Validate export indices
-        for (i, export) in self.exports.iter().enumerate() {
-            let indices = [
-                ("class_index", export.class_index),
-                ("super_index", export.super_index),
-                ("template_index", export.template_index),
-                ("outer_index", export.outer_index),
-            ];
-            
-            for (name, index) in indices {
-                if !index.is_null() {
-                    if let Err(e) = self.resolve(index) {
-                        errors.push(UnrealAssetError::new(&format!(
-                            "Invalid {} in export {}: {}", name, i, e
-                        )));
-                    }
-                }
-            }
-            
-            // Validate creation dependencies
-            for (j, &dep) in export.create_before_serialization_dependencies.iter().enumerate() {
-                if !dep.is_null() {
-                    if let Err(e) = self.resolve(dep) {
-                        errors.push(UnrealAssetError::new(&format!(
-                            "Invalid creation dependency {} in export {}: {}", j, i, e
-                        )));
-                    }
-                }
-            }
-        }
-        
-        errors
-    }
 }
 
 /// Object reference result from package index resolution
@@ -726,7 +660,7 @@ impl Asset {
         );
         
         // Validate all indices
-        let validation_errors = resolver.validate_all_indices(self);
+        let validation_errors = resolver.validate_all_indices()?;
         demo_output.push_str(&format!("  - Index Validation Errors: {}\n", validation_errors.len()));
         
         // Show some example resolutions
@@ -843,6 +777,7 @@ impl Asset {
         test_export.properties.insert("ObjectTest".to_string(), Property::Object(Some(PackageIndex::from_import(0))));
         
         asset_data.exports.push(test_export);
+        let name_count = asset_data.name_map.len() as i32;
         
         // Create asset with all Phase 2 features
         Ok(Asset {
@@ -852,7 +787,7 @@ impl Asset {
             generations: vec![
                 GenerationInfo {
                     export_count: 1,
-                    name_count: asset_data.name_map.len() as i32,
+                    name_count,
                 }
             ],
             package_guid: Uuid::new_v4(),
@@ -2478,6 +2413,8 @@ pub enum Error {
     Serialization(String),
     #[error("CUE4Parse error: {0}")]
     CUE4Parse(String),
+    #[error("Invalid data: {0}")]
+    InvalidData(String),
 }
 
 #[cfg(feature = "unrealmodding-compat")]
@@ -2498,6 +2435,7 @@ impl From<Error> for UnrealAssetError {
             Error::Io(e) => UnrealAssetError::Io(e),
             Error::Serialization(s) => UnrealAssetError::Parse(s),
             Error::CUE4Parse(s) => UnrealAssetError::Custom(s),
+            Error::InvalidData(s) => UnrealAssetError::Custom(format!("Invalid data: {}", s)),
         }
     }
 }
@@ -3492,6 +3430,18 @@ impl Property {
         Ok(size)
     }
     
+    /// Helper to write FName
+    fn write_fname<W: Write + Seek>(writer: &mut W, value: &FName) -> UnrealAssetResult<()> {
+        use byteorder::{WriteBytesExt, LittleEndian};
+        
+        // Write name index (for now, just write 0 as placeholder)
+        writer.write_i32::<LittleEndian>(0)?;
+        // Write name number
+        writer.write_u32::<LittleEndian>(value.number)?;
+        
+        Ok(())
+    }
+    
     /// Helper to write FString
     fn write_fstring<W: Write + Seek>(writer: &mut W, value: Option<&str>) -> UnrealAssetResult<()> {
         use byteorder::{WriteBytesExt, LittleEndian};
@@ -3653,8 +3603,8 @@ impl Property {
             Property::Array(elements) => {
                 4 + elements.iter().map(|e| e.get_binary_size()).sum::<usize>() // count + elements
             },
-            Property::Map(map) => {
-                4 + map.iter().map(|(k, v)| k.len() + 1 + v.get_binary_size()).sum::<usize>() // count + entries
+            Property::Map { entries, .. } => {
+                4 + entries.iter().map(|(k, v)| k.get_binary_size() + v.get_binary_size()).sum::<usize>() // count + entries
             },
             Property::Set(set) => {
                 4 + set.iter().map(|e| e.get_binary_size()).sum::<usize>() // count + elements
@@ -3668,7 +3618,7 @@ impl Property {
         match self {
             Property::Unknown(_) => false, // Unknown properties can't be reliably serialized
             Property::Array(elements) => elements.iter().all(|e| e.validate_for_binary()),
-            Property::Map(map) => map.values().all(|v| v.validate_for_binary()),
+            Property::Map { entries, .. } => entries.iter().all(|(k, v)| k.validate_for_binary() && v.validate_for_binary()),
             Property::Set(set) => set.iter().all(|e| e.validate_for_binary()),
             _ => true, // Most properties are valid for binary serialization
         }
@@ -3687,7 +3637,7 @@ impl Property {
     }
     
     /// Read property from binary format
-    pub fn read_binary<R: Read + Seek>(reader: &mut R, property_type: &str, size: u64) -> UnrealAssetResult<Self> {
+    pub fn read_binary<R: Read + Seek>(reader: &mut R, property_type: &str, size: u64) -> UnrealAssetResult<Property> {
         use byteorder::{ReadBytesExt, LittleEndian};
         
         let property = match property_type {
@@ -3711,14 +3661,14 @@ impl Property {
                 })
             }
             "StrProperty" => {
-                let string_value = Self::read_fstring(reader)?.unwrap_or_default();
+                let string_value = BinaryArchive::<R>::read_fstring_static(reader)?.unwrap_or_default();
                 Property::String(string_value)
             }
             "TextProperty" => {
                 // Read FText (simplified)
                 let _flags = reader.read_u32::<LittleEndian>()?;
                 let _history_type = reader.read_u8()?;
-                let text_value = Self::read_fstring(reader)?.unwrap_or_default();
+                let text_value = BinaryArchive::<R>::read_fstring_static(reader)?.unwrap_or_default();
                 Property::Text {
                     text: text_value,
                     namespace: None,
@@ -3773,7 +3723,6 @@ impl Property {
             Ok(Some(String::from_utf8_lossy(&buffer).into_owned()))
         }
     }
-}
 
 /// Struct property implementation
 #[cfg(feature = "unrealmodding-compat")]
@@ -4274,7 +4223,7 @@ impl<R: Read + Seek> BinaryAssetReader<R> {
         };
         
         Ok(Import {
-            class_package,
+            class_package: class_package.clone(),
             class_name,
             outer_index,
             object_name,
@@ -4869,7 +4818,8 @@ pub trait ArchiveTrait<Index: PackageIndexTrait>: Seek {
 
     /// Add a string slice to this archive as an `FName`, `FName` number will be 0
     fn add_fname(&mut self, value: &str) -> FName {
-        let mut name_map = self.get_name_map().get_mut();
+        let binding = self.get_name_map();
+        let mut name_map = binding.get_mut();
         if let Some(_index) = name_map.iter().position(|n| n == value) {
             FName::new(value)
         } else {
@@ -4880,7 +4830,8 @@ pub trait ArchiveTrait<Index: PackageIndexTrait>: Seek {
     
     /// Add a string slice to this archive as an `FName`
     fn add_fname_with_number(&mut self, value: &str, number: i32) -> FName {
-        let mut name_map = self.get_name_map().get_mut();
+        let binding = self.get_name_map();
+        let mut name_map = binding.get_mut();
         if let Some(_index) = name_map.iter().position(|n| n == value) {
             FName::with_number(value, number as u32)
         } else {
@@ -5186,6 +5137,45 @@ impl<R: Read + Seek> BinaryArchive<R> {
             custom_versions: HashMap::new(),
         }
     }
+    
+    /// Static method to read FString from a reader
+    pub fn read_fstring_static<R2: Read + Seek>(reader: &mut R2) -> UnrealAssetResult<Option<String>> {
+        use byteorder::{ReadBytesExt, LittleEndian};
+        
+        let length = reader.read_i32::<LittleEndian>()?;
+        
+        if length == 0 {
+            return Ok(None);
+        }
+        
+        if length < 0 {
+            // Unicode string (UTF-16)
+            let char_count = (-length) as usize;
+            let mut buffer = vec![0u16; char_count];
+            for i in 0..char_count {
+                buffer[i] = reader.read_u16::<LittleEndian>()?;
+            }
+            // Remove null terminator if present
+            if !buffer.is_empty() && buffer[buffer.len() - 1] == 0 {
+                buffer.pop();
+            }
+            String::from_utf16(&buffer)
+                .map(Some)
+                .map_err(|_| Error::Serialization("Invalid UTF-16 string".to_string()).into())
+        } else {
+            // ASCII string
+            let byte_count = length as usize;
+            let mut buffer = vec![0u8; byte_count];
+            reader.read_exact(&mut buffer)?;
+            // Remove null terminator if present
+            if !buffer.is_empty() && buffer[buffer.len() - 1] == 0 {
+                buffer.pop();
+            }
+            String::from_utf8(buffer)
+                .map(Some)
+                .map_err(|_| Error::Serialization("Invalid UTF-8 string".to_string()).into())
+        }
+    }
 }
 
 #[cfg(feature = "unrealmodding-compat")]
@@ -5206,15 +5196,20 @@ impl<R: Read + Seek> ArchiveTrait<PackageIndex> for BinaryArchive<R> {
         self.engine_version
     }
     
-    fn get_custom_version<T: CustomVersionTrait>(&self) -> Option<i32> {
-        self.custom_versions.get(&T::get_guid().to_string()).copied()
+    fn get_custom_version<T: CustomVersionTrait>(&self) -> CustomVersion {
+        // Create a default CustomVersion - in a real implementation this would look up the actual version
+        CustomVersion {
+            guid: T::guid(),
+            version: self.custom_versions.get(&T::guid().to_string()).copied().unwrap_or(0),
+            friendly_name: "Unknown".to_string(),
+        }
     }
     
     fn get_mappings(&self) -> Option<&Usmap> {
         None // Would need to be stored in the archive
     }
     
-    fn get_use_event_driven_loader(&self) -> bool {
+    fn use_event_driven_loader(&self) -> bool {
         false // Default implementation
     }
     
@@ -5232,6 +5227,32 @@ impl<R: Read + Seek> ArchiveTrait<PackageIndex> for BinaryArchive<R> {
     
     fn get_object_name_packageindex(&self, _index: PackageIndex) -> Option<FName> {
         None // Would need import/export tables
+    }
+    
+    fn has_unversioned_properties(&self) -> bool {
+        false // Default implementation - could be configured per archive
+    }
+    
+    fn position(&mut self) -> u64 {
+        self.reader.stream_position().unwrap_or(0)
+    }
+    
+    fn get_array_struct_type_override(&self) -> &IndexMap<String, String> {
+        // Return empty map - in a real implementation this would be populated
+        static EMPTY_MAP: std::sync::OnceLock<IndexMap<String, String>> = std::sync::OnceLock::new();
+        EMPTY_MAP.get_or_init(|| IndexMap::new())
+    }
+    
+    fn get_map_key_override(&self) -> &IndexMap<String, String> {
+        // Return empty map - in a real implementation this would be populated
+        static EMPTY_MAP: std::sync::OnceLock<IndexMap<String, String>> = std::sync::OnceLock::new();
+        EMPTY_MAP.get_or_init(|| IndexMap::new())
+    }
+    
+    fn get_map_value_override(&self) -> &IndexMap<String, String> {
+        // Return empty map - in a real implementation this would be populated
+        static EMPTY_MAP: std::sync::OnceLock<IndexMap<String, String>> = std::sync::OnceLock::new();
+        EMPTY_MAP.get_or_init(|| IndexMap::new())
     }
 }
 
@@ -5303,15 +5324,20 @@ impl<W: Write + Seek> ArchiveTrait<PackageIndex> for BinaryArchiveWriter<W> {
         self.engine_version
     }
     
-    fn get_custom_version<T: CustomVersionTrait>(&self) -> Option<i32> {
-        self.custom_versions.get(&T::get_guid().to_string()).copied()
+    fn get_custom_version<T: CustomVersionTrait>(&self) -> CustomVersion {
+        // Create a default CustomVersion - in a real implementation this would look up the actual version
+        CustomVersion {
+            guid: T::guid(),
+            version: self.custom_versions.get(&T::guid().to_string()).copied().unwrap_or(0),
+            friendly_name: "Unknown".to_string(),
+        }
     }
     
     fn get_mappings(&self) -> Option<&Usmap> {
         None
     }
     
-    fn get_use_event_driven_loader(&self) -> bool {
+    fn use_event_driven_loader(&self) -> bool {
         false
     }
     
@@ -5329,6 +5355,32 @@ impl<W: Write + Seek> ArchiveTrait<PackageIndex> for BinaryArchiveWriter<W> {
     
     fn get_object_name_packageindex(&self, _index: PackageIndex) -> Option<FName> {
         None
+    }
+    
+    fn has_unversioned_properties(&self) -> bool {
+        false // Default implementation - could be configured per archive
+    }
+    
+    fn position(&mut self) -> u64 {
+        self.writer.stream_position().unwrap_or(0)
+    }
+    
+    fn get_array_struct_type_override(&self) -> &IndexMap<String, String> {
+        // Return empty map - in a real implementation this would be populated
+        static EMPTY_MAP: std::sync::OnceLock<IndexMap<String, String>> = std::sync::OnceLock::new();
+        EMPTY_MAP.get_or_init(|| IndexMap::new())
+    }
+    
+    fn get_map_key_override(&self) -> &IndexMap<String, String> {
+        // Return empty map - in a real implementation this would be populated
+        static EMPTY_MAP: std::sync::OnceLock<IndexMap<String, String>> = std::sync::OnceLock::new();
+        EMPTY_MAP.get_or_init(|| IndexMap::new())
+    }
+    
+    fn get_map_value_override(&self) -> &IndexMap<String, String> {
+        // Return empty map - in a real implementation this would be populated
+        static EMPTY_MAP: std::sync::OnceLock<IndexMap<String, String>> = std::sync::OnceLock::new();
+        EMPTY_MAP.get_or_init(|| IndexMap::new())
     }
 }
 
@@ -5732,6 +5784,8 @@ pub struct StaticMeshData {
     pub normals: Option<Vec<Vector>>,
     /// Tangents (if available)
     pub tangents: Option<Vec<Vector>>,
+    /// Bounding box information
+    pub bounding_box: Option<BoundingBox>,
 }
 
 #[cfg(feature = "unrealmodding-compat")]
@@ -5745,6 +5799,7 @@ impl StaticMeshData {
             material_ranges: Vec::new(),
             normals: None,
             tangents: None,
+            bounding_box: None,
         }
     }
     
@@ -5761,6 +5816,23 @@ impl StaticMeshData {
     /// Get UV coordinates for a specific channel
     pub fn get_uv_channel(&self, channel: usize) -> Option<&Vec<Vector2D>> {
         self.uv_channels.get(channel)
+    }
+}
+
+/// Bounding box structure
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundingBox {
+    /// Minimum extent
+    pub min: Vector,
+    /// Maximum extent
+    pub max: Vector,
+}
+
+#[cfg(feature = "unrealmodding-compat")]
+impl BoundingBox {
+    pub fn new(min: Vector, max: Vector) -> Self {
+        Self { min, max }
     }
 }
 
@@ -5843,6 +5915,8 @@ impl MaterialData {
     }
 }
 
+
+
 /// Actor data structure for level editing
 #[cfg(feature = "unrealmodding-compat")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5857,6 +5931,22 @@ pub struct ActorData {
     pub properties: IndexMap<String, Property>,
     /// Component data
     pub components: Vec<ComponentData>,
+}
+
+
+
+#[cfg(feature = "unrealmodding-compat")]
+impl ActorData {
+    /// Create a new actor data
+    pub fn new() -> Self {
+        Self {
+            name: String::new(),
+            class: String::new(),
+            transform: Transform::identity(),
+            properties: IndexMap::new(),
+            components: Vec::new(),
+        }
+    }
 }
 
 /// Component data structure
@@ -5911,53 +6001,202 @@ impl AdvancedAssetProcessing for Asset {
         if let Some(export) = mesh_export {
             let mut mesh_data = StaticMeshData::new();
             
-            // Extract mesh data from the CUE4Parse JSON output
+            // Extract mesh data from CUE4Parse JSON format
             if let Some(extras) = &export.extras {
-                // Handle multiple possible CUE4Parse JSON structures
-                
-                // Method 1: Look for RenderData.LODs structure (standard for newer CUE4Parse)
+                // Method 1: Look for RenderData.LODs structure (standard CUE4Parse format)
                 if let Some(render_data) = extras.get("RenderData") {
                     if let Some(lods) = render_data.get("LODs") {
-                        if let Some(lod0) = lods.get(0) {
-                            self.extract_mesh_vertices_from_lod(&mut mesh_data, lod0);
-                            self.extract_mesh_indices_from_lod(&mut mesh_data, lod0);
-                            self.extract_mesh_uvs_from_lod(&mut mesh_data, lod0);
+                        if let Some(lod_array) = lods.as_array() {
+                            if let Some(first_lod) = lod_array.get(0) {
+                                // Extract vertices from PositionVertexBuffer
+                                if let Some(position_buffer) = first_lod.get("PositionVertexBuffer") {
+                                    if let Some(vertices) = position_buffer.get("Vertices") {
+                                        if let Some(vertex_array) = vertices.as_array() {
+                                            mesh_data.vertices = vertex_array
+                                                .iter()
+                                                .filter_map(|v| {
+                                                    if let (Some(x), Some(y), Some(z)) = (
+                                                        v.get("X").and_then(|x| x.as_f64()),
+                                                        v.get("Y").and_then(|y| y.as_f64()),
+                                                        v.get("Z").and_then(|z| z.as_f64())
+                                                    ) {
+                                                        Some(Vector { x, y, z })
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .collect();
+                                        }
+                                    }
+                                }
+                                
+                                // Extract indices from IndexBuffer
+                                if let Some(index_buffer) = first_lod.get("IndexBuffer") {
+                                    if let Some(indices) = index_buffer.get("Indices") {
+                                        if let Some(index_array) = indices.as_array() {
+                                            mesh_data.indices = index_array
+                                                .iter()
+                                                .filter_map(|i| i.as_u64().map(|u| u as u32))
+                                                .collect();
+                                        }
+                                    }
+                                }
+                                
+                                // Extract normals and UVs from VertexBuffer
+                                if let Some(vertex_buffer) = first_lod.get("VertexBuffer") {
+                                    if let Some(uv_data) = vertex_buffer.get("UV") {
+                                        if let Some(uv_array) = uv_data.as_array() {
+                                            for uv_item in uv_array {
+                                                // Extract normals from packed normal data
+                                                if let Some(normal_data) = uv_item.get("Normal") {
+                                                    if let Some(normal_array) = normal_data.as_array() {
+                                                        for normal in normal_array {
+                                                            if let (Some(x), Some(y), Some(z)) = (
+                                                                normal.get("X").and_then(|x| x.as_f64()),
+                                                                normal.get("Y").and_then(|y| y.as_f64()),
+                                                                normal.get("Z").and_then(|z| z.as_f64())
+                                                            ) {
+                                                                if let Some(ref mut normals_vec) = mesh_data.normals {
+                                                                    normals_vec.push(Vector { x, y, z });
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                
+                                                // Extract UV coordinates
+                                                if let Some(uv_coords) = uv_item.get("UV") {
+                                                    if let Some(uv_coord_array) = uv_coords.as_array() {
+                                                        for uv in uv_coord_array {
+                                                            if let (Some(u), Some(v)) = (
+                                                                uv.get("U").and_then(|u| u.as_f64()),
+                                                                uv.get("V").and_then(|v| v.as_f64())
+                                                            ) {
+                                                                // Initialize first UV channel if empty
+                                                                if mesh_data.uv_channels.is_empty() {
+                                                                    mesh_data.uv_channels.push(Vec::new());
+                                                                }
+                                                                mesh_data.uv_channels[0].push(Vector2D { x: u, y: v });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Extract sections for material assignment
+                                if let Some(sections) = first_lod.get("Sections") {
+                                    if let Some(section_array) = sections.as_array() {
+                                        for section in section_array {
+                                            if let Some(material_index) = section.get("MaterialIndex").and_then(|i| i.as_u64()) {
+                                                // Store material range information
+                                                mesh_data.material_ranges.push((material_index as u32, material_index as u32 + 1));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 
-                // Method 2: Look for direct LODModels structure (older format)
+                // Method 2: Look for direct LODModels structure (skeletal mesh format that might be used)
                 else if let Some(lod_models) = extras.get("LODModels") {
-                    if let Some(lod0) = lod_models.get(0) {
-                        self.extract_mesh_vertices_from_lod(&mut mesh_data, lod0);
-                        self.extract_mesh_indices_from_lod(&mut mesh_data, lod0);
-                        self.extract_mesh_uvs_from_lod(&mut mesh_data, lod0);
+                    if let Some(lod_array) = lod_models.as_array() {
+                        if let Some(first_lod) = lod_array.get(0) {
+                            // Extract from skeletal mesh LOD format (similar structure)
+                            if let Some(vertices) = first_lod.get("Vertices") {
+                                if let Some(vertex_array) = vertices.as_array() {
+                                    for vertex in vertex_array {
+                                        if let (Some(x), Some(y), Some(z)) = (
+                                            vertex.get("Position").and_then(|p| p.get("X")).and_then(|x| x.as_f64()),
+                                            vertex.get("Position").and_then(|p| p.get("Y")).and_then(|y| y.as_f64()),
+                                            vertex.get("Position").and_then(|p| p.get("Z")).and_then(|z| z.as_f64())
+                                        ) {
+                                            mesh_data.vertices.push(Vector { x, y, z });
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 
-                // Method 3: Look for top-level mesh data (alternative structure)
+                // Method 3: Look for top-level mesh data (fallback)
                 else {
                     // Try to find vertex data at top level
                     if let Some(vertices) = extras.get("Vertices") {
-                        self.extract_vertices_from_array(&mut mesh_data, vertices);
+                        if let Some(vertices_array) = vertices.as_array() {
+                            for vertex in vertices_array {
+                                if let (Some(x), Some(y), Some(z)) = (
+                                    vertex.get("X").and_then(|v| v.as_f64()),
+                                    vertex.get("Y").and_then(|v| v.as_f64()),
+                                    vertex.get("Z").and_then(|v| v.as_f64())
+                                ) {
+                                    mesh_data.vertices.push(Vector { x, y, z });
+                                }
+                            }
+                        }
                     }
+                    
                     if let Some(indices) = extras.get("Indices") {
-                        self.extract_indices_from_array(&mut mesh_data, indices);
+                        if let Some(indices_array) = indices.as_array() {
+                            for idx in indices_array {
+                                if let Some(index) = idx.as_u64() {
+                                    mesh_data.indices.push(index as u32);
+                                }
+                            }
+                        }
                     }
+                    
                     if let Some(uvs) = extras.get("TextureCoordinates") {
-                        self.extract_uvs_from_array(&mut mesh_data, uvs);
+                        if let Some(uvs_array) = uvs.as_array() {
+                            for uv in uvs_array {
+                                if let (Some(u), Some(v)) = (
+                                    uv.get("U").and_then(|v| v.as_f64()),
+                                    uv.get("V").and_then(|v| v.as_f64())
+                                ) {
+                                    // Initialize first UV channel if empty
+                                    if mesh_data.uv_channels.is_empty() {
+                                        mesh_data.uv_channels.push(Vec::new());
+                                    }
+                                    mesh_data.uv_channels[0].push(Vector2D { x: u, y: v });
+                                }
+                            }
+                        }
                     }
                 }
                 
-                // Extract material information from StaticMaterials or Materials
-                if let Some(materials) = extras.get("StaticMaterials")
-                    .or_else(|| extras.get("Materials")) {
-                    self.extract_material_references(&mut mesh_data, materials);
+                // Extract material information from StaticMaterials array
+                if let Some(materials) = extras.get("StaticMaterials") {
+                    if let Some(material_array) = materials.as_array() {
+                        for material in material_array {
+                            if let Some(material_obj) = material.get("Material") {
+                                if let Some(material_name) = material_obj.get("Name").and_then(|n| n.as_str()) {
+                                    mesh_data.materials.push(material_name.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
                 
-                // Extract bounding box information if available
-                if let Some(bounds) = extras.get("Bounds") {
-                    self.extract_mesh_bounds(&mut mesh_data, bounds);
+                // Extract bounding box from ImportedBounds
+                if let Some(bounds) = extras.get("ImportedBounds") {
+                    if let (Some(min), Some(max)) = (bounds.get("Min"), bounds.get("Max")) {
+                        let min_vec = Vector {
+                            x: min.get("X").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                            y: min.get("Y").and_then(|y| y.as_f64()).unwrap_or(0.0),
+                            z: min.get("Z").and_then(|z| z.as_f64()).unwrap_or(0.0),
+                        };
+                        let max_vec = Vector {
+                            x: max.get("X").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                            y: max.get("Y").and_then(|y| y.as_f64()).unwrap_or(0.0),
+                            z: max.get("Z").and_then(|z| z.as_f64()).unwrap_or(0.0),
+                        };
+                        mesh_data.bounding_box = Some(BoundingBox { min: min_vec, max: max_vec });
+                    }
                 }
             }
             
@@ -6057,34 +6296,102 @@ impl AdvancedAssetProcessing for Asset {
             
             let mut material_data = MaterialData::new(material_name, material_type);
             
-            // Extract material data from extras if available
+            // Extract material data from CUE4Parse JSON format
             if let Some(extras) = &export.extras {
-                // Extract texture references from material expressions
-                if let Some(expressions) = extras.get("Expressions") {
-                    self.extract_material_textures_from_expressions(&mut material_data, expressions);
+                // Extract texture parameters from MaterialData.Parameters.Textures
+                if let Some(parameters) = extras.get("Parameters") {
+                    if let Some(textures) = parameters.get("Textures") {
+                        if let Some(texture_map) = textures.as_object() {
+                            for (param_name, texture_value) in texture_map {
+                                if let Some(texture_name) = texture_value.get("Name").and_then(|n| n.as_str()) {
+                                    material_data.textures.insert(param_name.clone(), texture_name.to_string());
+                                    material_data.textures.insert(param_name.clone(), texture_name.to_string());
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Extract scalar parameters
+                    if let Some(scalars) = parameters.get("Scalars") {
+                        if let Some(scalar_map) = scalars.as_object() {
+                            for (param_name, scalar_value) in scalar_map {
+                                if let Some(value) = scalar_value.as_f64() {
+                                    material_data.scalar_parameters.insert(param_name.clone(), value as f32);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Extract vector parameters 
+                    if let Some(vectors) = parameters.get("Vectors") {
+                        if let Some(vector_map) = vectors.as_object() {
+                            for (param_name, vector_value) in vector_map {
+                                if let (Some(x), Some(y), Some(z), Some(w)) = (
+                                    vector_value.get("X").and_then(|v| v.as_f64()),
+                                    vector_value.get("Y").and_then(|v| v.as_f64()),
+                                    vector_value.get("Z").and_then(|v| v.as_f64()),
+                                    vector_value.get("W").and_then(|v| v.as_f64())
+                                ) {
+                                    material_data.vector_parameters.insert(
+                                        param_name.clone(), 
+                                        LinearColor { r: x as f32, g: y as f32, b: z as f32, a: w as f32 }
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Extract boolean/switch parameters
+                    if let Some(switches) = parameters.get("Switches") {
+                        if let Some(switch_map) = switches.as_object() {
+                            for (param_name, switch_value) in switch_map {
+                                if let Some(value) = switch_value.as_bool() {
+                                    material_data.boolean_parameters.insert(param_name.clone(), value);
+                                }
+                            }
+                        }
+                    }
                 }
                 
-                // Extract scalar and vector parameters
-                if let Some(scalar_params) = extras.get("ScalarParameterValues") {
-                    self.extract_scalar_parameters(&mut material_data, scalar_params);
+                // Extract texture references from top-level material properties
+                for texture_prop in ["BaseColorTexture", "NormalTexture", "SpecularTexture", "RoughnessTexture", "MetallicTexture", "EmissiveTexture"] {
+                    if let Some(texture_ref) = extras.get(texture_prop) {
+                        if let Some(texture_name) = texture_ref.get("Name").and_then(|n| n.as_str()) {
+                            material_data.textures.insert(texture_prop.to_string(), texture_name.to_string());
+                        }
+                    }
                 }
                 
-                if let Some(vector_params) = extras.get("VectorParameterValues") {
-                    self.extract_vector_parameters(&mut material_data, vector_params);
+                // Extract blend mode and other material settings
+                if let Some(blend_mode) = extras.get("BlendMode").and_then(|v| v.as_str()) {
+                    // Store blend mode as a scalar parameter (0.0 for now)
+                    material_data.scalar_parameters.insert("BlendMode".to_string(), 0.0);
                 }
                 
-                // Extract texture parameters
-                if let Some(texture_params) = extras.get("TextureParameterValues") {
-                    self.extract_texture_parameters(&mut material_data, texture_params);
+                if let Some(shading_model) = extras.get("ShadingModel").and_then(|v| v.as_str()) {
+                    // Store shading model as a scalar parameter (0.0 for now)
+                    material_data.scalar_parameters.insert("ShadingModel".to_string(), 0.0);
                 }
                 
-                // Extract boolean parameters
-                if let Some(bool_params) = extras.get("StaticSwitchParameterValues") {
-                    self.extract_boolean_parameters(&mut material_data, bool_params);
+                // Extract material function connections
+                if let Some(material_graph) = extras.get("MaterialGraph") {
+                    if let Some(expressions) = material_graph.get("Expressions") {
+                        if let Some(expr_array) = expressions.as_array() {
+                            for expr in expr_array {
+                                if let Some(expr_type) = expr.get("Type").and_then(|t| t.as_str()) {
+                                    if expr_type.contains("Texture") {
+                                        if let Some(texture_name) = expr.get("Texture").and_then(|t| t.get("Name")).and_then(|n| n.as_str()) {
+                                            material_data.textures.insert(format!("Expr_{}", expr_type), texture_name.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             
-            // Also extract from property system
+            // Also extract from property system (fallback)
             for (prop_name, property) in &export.properties {
                 match property {
                     Property::Object(Some(obj_ref)) => {
@@ -6126,9 +6433,20 @@ impl AdvancedAssetProcessing for Asset {
                     if let Property::Array(actor_refs) = property {
                         for actor_ref in actor_refs {
                             if let Property::Object(Some(obj_ref)) = actor_ref {
-                                if let Ok(actor_export) = self.get_export(*obj_ref) {
-                                    let actor = self.build_actor_from_export(actor_export)?;
-                                    actors.push(actor);
+                                if let Some(actor_export_index) = obj_ref.export_index() {
+                                    if let Some(actor_export) = self.asset_data.exports.get(actor_export_index) {
+                                        // Build actor from export
+                                        let mut actor = ActorData::new();
+                                        actor.name = actor_export.object_name.name.clone();
+                                        actor.class = format!("Actor_{}", actor_export_index);
+                                        
+                                        // Extract actor properties
+                                        for (prop_name, prop_value) in &actor_export.properties {
+                                            actor.properties.insert(prop_name.clone(), prop_value.clone());
+                                        }
+                                        
+                                        actors.push(actor);
+                                    }
                                 }
                             }
                         }
@@ -6139,8 +6457,23 @@ impl AdvancedAssetProcessing for Asset {
         
         // Also look for individual actor exports
         for export in &self.asset_data.exports {
-            if self.is_actor_export(export) {
-                let actor = self.build_actor_from_export(export)?;
+            // Check if this is an actor export by name patterns
+            let is_actor = export.object_name.name.contains("Actor") ||
+                          export.object_name.name.contains("Pawn") ||
+                          export.object_name.name.contains("Character") ||
+                          export.object_name.name.starts_with("BP_");
+                          
+            if is_actor {
+                // Build actor from export
+                let mut actor = ActorData::new();
+                actor.name = export.object_name.name.clone();
+                actor.class = format!("Actor_{}", export.object_name.name);
+                
+                // Extract actor properties
+                for (prop_name, prop_value) in &export.properties {
+                    actor.properties.insert(prop_name.clone(), prop_value.clone());
+                }
+                
                 actors.push(actor);
             }
         }
@@ -6233,17 +6566,7 @@ pub struct Asset<C = std::io::Cursor<Vec<u8>>> {
     _phantom: std::marker::PhantomData<C>,
 }
 
-/// Generation info structure
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GenerationInfo {
-    /// Export count for this generation
-    pub export_count: i32,
-    /// Name count for this generation  
-    pub name_count: i32,
-    /// Net object count for this generation
-    pub net_object_count: i32,
-}
+
 
 #[cfg(feature = "unrealmodding-compat")]
 impl<C: Read + Seek> Asset<C> {
@@ -6335,12 +6658,6 @@ impl<C: Read + Seek> Asset<C> {
             depends_map: None,
             soft_package_reference_list: None,
             custom_versions: Vec::new(),
-            asset_tags: HashMap::new(),
-            object_version_ue5: ObjectVersionUE5::new(0),
-            mappings: usmap,
-            _phantom: std::marker::PhantomData,
-        })
-    }
             asset_tags: HashMap::new(),
             object_version_ue5: ObjectVersionUE5::new(0),
             mappings: usmap,
@@ -6504,7 +6821,7 @@ impl<C: Read + Seek> Asset<C> {
         writer.write_i32::<LittleEndian>(self.custom_versions.len() as i32)?;
         for custom_version in &self.custom_versions {
             // Write GUID (16 bytes)
-            writer.write_all(&custom_version.guid.as_bytes())?;
+            writer.write_all(custom_version.guid.as_bytes())?;
             writer.write_i32::<LittleEndian>(custom_version.version)?;
         }
         
@@ -6521,8 +6838,6 @@ impl<C: Read + Seek> Asset<C> {
             }
         }
         
-        Ok(())
-            
         Ok(())
     }
     
@@ -6737,9 +7052,17 @@ pub fn read<C: Read + Seek>(
         
         let export = Export {
             class_index,
+            super_index: PackageIndex::null(),
+            template_index: PackageIndex::null(),
+            outer_index: PackageIndex::null(),
             object_name,
+            object_flags: 0,
+            serial_size: 0,
+            serial_offset: 0,
+            export_flags: 0,
             properties: IndexMap::new(),
             extras: None,
+            create_before_serialization_dependencies: Vec::new(),
         };
         
         asset_data_struct.exports.push(export);
@@ -6767,8 +7090,12 @@ pub fn read<C: Read + Seek>(
         };
         
         let import = Import {
+            class_package: FName::new("CoreUObject"),
             class_name,
+            outer_index: PackageIndex::null(),
             object_name,
+            package_guid: None,
+            package_name: FName::new("Unknown"),
         };
         
         asset_data_struct.imports.push(import);
@@ -6801,6 +7128,7 @@ pub fn read<C: Read + Seek>(
         custom_versions.push(CustomVersion {
             guid,
             version,
+            friendly_name: format!("CustomVersion_{}", guid),
         });
     }
     
@@ -6834,55 +7162,22 @@ pub fn read<C: Read + Seek>(
         _phantom: std::marker::PhantomData,
     })
 }
-        Some(Usmap {
-            version: 1,
-            name_map: Vec::new(),
-            enum_map: HashMap::new(),
-            struct_map: HashMap::new(),
-        })
-    } else {
-        None
-    };
-    
-    Ok(Asset {
-        asset_data: asset_data_struct,
-        legacy_file_version: -4,
-        info: "Loaded with CUE4Parse Rust compatibility layer".to_string(),
-        generations: Vec::new(),
-        package_guid: Uuid::new_v4(),
-        engine_version_recorded: *engine_version,
-        engine_version_compatible: *engine_version,
-        chunk_ids: Vec::new(),
-        package_source: 0,
-        folder_name: String::new(),
-        use_event_driven_loader: bulk_reader.is_some(),
-        bulk_data_start_offset: 0,
-        world_tile_info: None,
-        depends_map: None,
-        soft_package_reference_list: None,
-        custom_versions: Vec::new(),
-        asset_tags: HashMap::new(),
-        object_version_ue5: ObjectVersionUE5::new(0),
-        mappings: usmap,
-        _phantom: std::marker::PhantomData,
-    })
-}
 
 /// Non-generic Asset implementation for simple creation
 #[cfg(feature = "unrealmodding-compat")]
-impl Asset {
+impl Asset<std::io::Cursor<Vec<u8>>> {
     /// Create a simple new Asset without generic parameters
     /// 
     /// This provides an easy way to create Asset instances for compatibility
     /// with code that doesn't use the generic reader parameter.
-    pub fn new() -> Self {
+    pub fn simple() -> Self {
         Self::new_empty()
     }
 }
 
 /// Default implementation for Asset
 #[cfg(feature = "unrealmodding-compat")]
-impl<C> Default for Asset<C> {
+impl<C: Read + Seek> Default for Asset<C> {
     fn default() -> Self {
         Self::new_empty()
     }
@@ -6904,7 +7199,7 @@ impl<C> Default for Asset<C> {
 /// # Returns
 /// Result indicating success or failure
 #[cfg(feature = "unrealmodding-compat")]
-pub fn write<C, W: Write + Seek>(
+pub fn write<C: Read + Seek, W: Write + Seek>(
     asset: &Asset<C>,
     asset_writer: &mut W,
     bulk_writer: Option<&mut W>,
@@ -6979,6 +7274,10 @@ impl<C: Read + Seek> UnrealAssetCompat for Asset<C> {
             world_tile_info: None,
             depends_map: None,
             soft_package_reference_list: None,
+            custom_versions: Vec::new(),
+            asset_tags: HashMap::new(),
+            object_version_ue5: ObjectVersionUE5(0),
+            mappings: None,
             asset_data,
             _phantom: std::marker::PhantomData,
         })
@@ -6993,288 +7292,6 @@ pub fn from_cue4parse_provider<C: Read + Seek>(
     object_path: &str,
 ) -> Result<Asset<C>> {
     Asset::from_cue4parse(provider, object_path)
-}
-
-/// Helper function to convert quaternion to euler angles (roll, pitch, yaw)
-/// Helper function to convert quaternion to euler angles (roll, pitch, yaw)
-    
-    /// Enhanced property extraction with type hints
-        match value {
-            serde_json::Value::Bool(b) => Property::Bool(*b),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
-                        Property::Int32(i as i32)
-                    } else {
-                        Property::Int64(i)
-                    }
-                } else if let Some(f) = n.as_f64() {
-                    Property::Double(f)
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            serde_json::Value::String(s) => {
-                match property_type {
-                    Some("NameProperty") | Some("Name") => Property::Name(FName::new(s.clone())),
-                    Some("ObjectProperty") => {
-                        // Parse object path
-                        if s.is_empty() || s == "None" {
-                            Property::Object(None)
-                        } else {
-                            // Would need proper object resolution
-                            Property::Object(Some(PackageIndex(1)))
-                        }
-                    },
-                    Some("SoftObjectProperty") => {
-                        Property::SoftObjectPath(SoftObjectPath::new(s.clone(), ""))
-                    },
-                    Some("SoftClassProperty") => {
-                        Property::SoftClassPath(SoftObjectPath::new(s.clone(), ""))
-                    },
-                    Some("AssetObjectProperty") => {
-                        Property::AssetObjectProperty(SoftObjectPath::new(s.clone(), ""))
-                    },
-                    _ => Property::String(s.clone()),
-                }
-            },
-            serde_json::Value::Array(arr) => {
-                let properties: Vec<Property> = arr.iter()
-                    .map(|v| Self::json_to_property(v, None))
-                    .collect();
-                Property::Array(properties)
-            },
-            serde_json::Value::Object(obj) => {
-                // Handle special struct types
-                if let Some(struct_type) = obj.get("$type").and_then(|v| v.as_str()) {
-                    match struct_type {
-                        "Vector" => {
-                            let x = obj.get("X").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let y = obj.get("Y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let z = obj.get("Z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            Property::Vector(Vector::new(x, y, z))
-                        },
-                        "Vector4" => {
-                            let x = obj.get("X").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let y = obj.get("Y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let z = obj.get("Z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let w = obj.get("W").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            Property::Vector4(Vector4::new(x, y, z, w))
-                        },
-                        "Vector2D" => {
-                            let x = obj.get("X").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let y = obj.get("Y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            Property::Vector2D(Vector2D::new(x, y))
-                        },
-                        "Rotator" => {
-                            let pitch = obj.get("Pitch").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let yaw = obj.get("Yaw").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let roll = obj.get("Roll").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            Property::Rotator(Rotator::new(pitch, yaw, roll))
-                        },
-                        "Quat" => {
-                            let x = obj.get("X").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let y = obj.get("Y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let z = obj.get("Z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let w = obj.get("W").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                            Property::Quat(Quat::new(x, y, z, w))
-                        },
-                        "LinearColor" => {
-                            let r = obj.get("R").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                            let g = obj.get("G").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                            let b = obj.get("B").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                            let a = obj.get("A").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-                            Property::LinearColor(LinearColor::new(r, g, b, a))
-                        },
-                        "Transform" => {
-                            let location = obj.get("Translation")
-                                .map(|v| Self::json_to_property(v, Some("Vector")))
-                                .and_then(|p| match p {
-                                    Property::Vector(v) => Some(v),
-                                    _ => None,
-                                })
-                                .unwrap_or_else(Vector::zero);
-                                
-                            let rotation = obj.get("Rotation")
-                                .map(|v| Self::json_to_property(v, Some("Quat")))
-                                .and_then(|p| match p {
-                                    Property::Quat(q) => Some(q),
-                                    _ => None,
-                                })
-                                .unwrap_or_else(Quat::identity);
-                                
-                            let scale = obj.get("Scale3D")
-                                .map(|v| Self::json_to_property(v, Some("Vector")))
-                                .and_then(|p| match p {
-                                    Property::Vector(v) => Some(v),
-                                    _ => None,
-                                })
-                                .unwrap_or_else(|| Vector::new(1.0, 1.0, 1.0));
-                                
-                            Property::Transform(Transform::new(location, rotation, scale))
-                        },
-                        "SoftObjectPath" => {
-                            let asset_path = obj.get("AssetPathName")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let sub_path = obj.get("SubPathString")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            Property::SoftObjectPath(SoftObjectPath::new(asset_path, sub_path))
-                        },
-                        "Guid" => {
-                            let a = obj.get("A").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let b = obj.get("B").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let c = obj.get("C").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let d = obj.get("D").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            Property::Guid([a, b, c, d])
-                        },
-                        _ => {
-                            // Generic struct handling
-                            let mut properties = IndexMap::new();
-                            for (key, val) in obj {
-                                if key != "$type" {
-                                    properties.insert(key.clone(), Self::json_to_property(val, None));
-                                }
-                            }
-                            Property::Struct {
-                                struct_type: FName::new(struct_type),
-                                properties,
-                            }
-                        }
-                    }
-                } else if obj.contains_key("EnumType") && obj.contains_key("EnumValue") {
-                    // Handle enum properties
-                    let enum_type = obj.get("EnumType")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown");
-                    let enum_value = obj.get("EnumValue")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("None");
-                    Property::Enum {
-                        enum_type: FName::new(enum_type),
-                        value: FName::new(enum_value),
-                    }
-                } else {
-                    // Generic struct or map
-                    if obj.keys().any(|k| k.chars().all(|c| c.is_ascii_digit())) {
-                        // Looks like an array represented as object with numeric keys
-                        let mut array = Vec::new();
-                        let mut keys: Vec<_> = obj.keys().collect();
-                        keys.sort_by_key(|k| k.parse::<usize>().unwrap_or(0));
-                        for key in keys {
-                            if let Some(value) = obj.get(key) {
-                                array.push(Self::json_to_property(value, None));
-                            }
-                        }
-                        Property::Array(array)
-                    } else {
-                        // Generic struct
-                        let mut properties = IndexMap::new();
-                        for (key, val) in obj {
-                            properties.insert(key.clone(), Self::json_to_property(val, None));
-                        }
-                        
-                        Property::Struct {
-                            struct_type: FName::new("Struct"),
-                            properties,
-                        }
-                    }
-                }
-            },
-            serde_json::Value::Null => Property::Object(None),
-        }
-    }
-    
-    /// Enhanced property extraction with type hints
-    pub fn extract_property_with_type(&self, export_index: usize, property_name: &str, expected_type: &str) -> Option<Property> {
-        self.asset_data.exports.get(export_index)
-            .and_then(|export| export.properties.get(property_name))
-            .cloned()
-            .or_else(|| {
-                // Try to find property in extras with type information
-                self.asset_data.exports.get(export_index)
-                    .and_then(|export| export.extras.as_ref())
-                    .and_then(|extras| extras.get(property_name))
-                    .map(|value| Self::json_to_property(value, Some(expected_type)))
-            })
-    }
-    
-    /// Get actor transform components (Stove compatibility)
-    pub fn get_actor_transform(&self, export_index: usize) -> Option<Transform> {
-        let export = self.asset_data.exports.get(export_index)?;
-        
-        let mut transform = Transform::identity();
-        
-        // Look for transform properties commonly used by Stove
-        for (prop_name, property) in &export.properties {
-            match (prop_name.as_str(), property) {
-                ("RelativeLocation" | "Location", Property::Vector(v)) => {
-                    transform.location = v.clone();
-                },
-                ("RelativeRotation" | "Rotation", Property::Rotator(r)) => {
-                    // Convert rotator to quaternion (simplified conversion)
-                    transform.rotation = Quat::new(
-                        r.pitch.to_radians() * 0.5,
-                        r.yaw.to_radians() * 0.5, 
-                        r.roll.to_radians() * 0.5,
-                        1.0
-                    );
-                },
-                ("RelativeScale3D" | "Scale3D", Property::Vector(s)) => {
-                    transform.scale = s.clone();
-                },
-                _ => {}
-            }
-        }
-        
-        Some(transform)
-    }
-    
-    /// Set actor transform components (Stove compatibility)
-    pub fn set_actor_transform(&mut self, export_index: usize, transform: &Transform) -> bool {
-        if let Some(export) = self.asset_data.exports.get_mut(export_index) {
-            // Set location
-            export.properties.insert(
-                "RelativeLocation".to_string(),
-                Property::Vector(transform.location.clone())
-            );
-            
-            // Set rotation (convert from quaternion to rotator)
-            let (roll, pitch, yaw) = quaternion_to_euler(&transform.rotation);
-            export.properties.insert(
-                "RelativeRotation".to_string(),
-                Property::Rotator(Rotator::new(pitch, yaw, roll))
-            );
-            
-            // Set scale
-            export.properties.insert(
-                "RelativeScale3D".to_string(),
-                Property::Vector(transform.scale.clone())
-            );
-            
-            true
-        } else {
-            false
-        }
-    }
-    
-    /// Find mesh component for an actor (Stove-specific)
-    pub fn find_mesh_component(&self, actor_export_index: usize) -> Option<usize> {
-        let actor_export = self.asset_data.exports.get(actor_export_index)?;
-        
-        // Look for RootComponent or StaticMeshComponent references
-        for (prop_name, property) in &actor_export.properties {
-            if prop_name.contains("Mesh") || prop_name == "RootComponent" {
-                if let Property::Object(Some(component_ref)) = property {
-                    if component_ref.is_export() {
-                        return component_ref.export_index();
-                    }
-                }
-            }
-        }
-        None
-    }
 }
 
 /// Helper function to convert quaternion to euler angles (roll, pitch, yaw)
@@ -7326,448 +7343,43 @@ impl ConversionUtils {
         }
     }
     
-    /// Convert a CUE4Parse GameVersion to a version string
-    pub fn game_version_to_string(version: &crate::GameVersion) -> String {
-        match version {
-            crate::GameVersion::UE4_0 => "4.0.0".to_string(),
-            crate::GameVersion::UE4_27 => "4.27.0".to_string(),
-            crate::GameVersion::UE5_0 => "5.0.0".to_string(),
-            crate::GameVersion::UE5_1 => "5.1.0".to_string(),
-            crate::GameVersion::UE5_2 => "5.2.0".to_string(),
-            crate::GameVersion::UE5_3 => "5.3.0".to_string(),
-            crate::GameVersion::UE5_4 => "5.4.0".to_string(),
-            crate::GameVersion::UE5_5 => "5.5.0".to_string(),
-        }
+    /// Enhanced property extraction with type hints
+    pub fn extract_property_with_type<C>(asset: &Asset<C>, export_index: usize, property_name: &str, expected_type: &str) -> Option<Property> {
+        asset.asset_data.exports.get(export_index)
+            .and_then(|export| export.properties.get(property_name))
+            .cloned()
+            .or_else(|| {
+                // Try to find property in extras with type information
+                asset.asset_data.exports.get(export_index)
+                    .and_then(|export| export.extras.as_ref())
+                    .and_then(|extras| extras.get(property_name))
+                    .map(|value| Self::json_to_property(value, Some(expected_type)))
+            })
     }
     
-    /// Convert a JSON value to a Property with type hints
-    pub fn json_to_property_typed(value: &serde_json::Value, type_hint: &str) -> Property {
-        match type_hint {
-            "BoolProperty" => Property::Bool(value.as_bool().unwrap_or(false)),
-            "IntProperty" => Property::Int32(value.as_i64().unwrap_or(0) as i32),
-            "Int64Property" => Property::Int64(value.as_i64().unwrap_or(0)),
-            "FloatProperty" => Property::Float(value.as_f64().unwrap_or(0.0) as f32),
-            "DoubleProperty" => Property::Double(value.as_f64().unwrap_or(0.0)),
-            "StrProperty" => Property::String(value.as_str().unwrap_or("").to_string()),
-            "NameProperty" => Property::Name(FName::new(value.as_str().unwrap_or(""))),
-            "ObjectProperty" => {
-                if value.is_null() {
-                    Property::Object(None)
-                } else {
-                    // Would need more context to resolve object references properly
-                    Property::Object(Some(PackageIndex::null()))
-                }
-            },
-            "VectorProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let x = obj.get("X").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let y = obj.get("Y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let z = obj.get("Z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    Property::Vector(Vector::new(x, y, z))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "Vector4Property" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let x = obj.get("X").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let y = obj.get("Y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let z = obj.get("Z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let w = obj.get("W").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    Property::Vector4(Vector4::new(x, y, z, w))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "Vector2DProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let x = obj.get("X").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let y = obj.get("Y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    Property::Vector2D(Vector2D::new(x, y))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "RotatorProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let pitch = obj.get("Pitch").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let yaw = obj.get("Yaw").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let roll = obj.get("Roll").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    Property::Rotator(Rotator::new(pitch, yaw, roll))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "QuatProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let x = obj.get("X").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let y = obj.get("Y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let z = obj.get("Z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let w = obj.get("W").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                    Property::Quat(Quat::new(x, y, z, w))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "LinearColorProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let r = obj.get("R").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                    let g = obj.get("G").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                    let b = obj.get("B").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                    let a = obj.get("A").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-                    Property::LinearColor(LinearColor::new(r, g, b, a))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "TransformProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let location = obj.get("Translation")
-                        .map(|v| Self::json_to_property_typed(v, "VectorProperty"))
-                        .and_then(|p| match p {
-                            Property::Vector(v) => Some(v),
-                            _ => None,
-                        })
-                        .unwrap_or_else(Vector::zero);
-                        
-                    let rotation = obj.get("Rotation")
-                        .map(|v| Self::json_to_property_typed(v, "QuatProperty"))
-                        .and_then(|p| match p {
-                            Property::Quat(q) => Some(q),
-                            _ => None,
-                        })
-                        .unwrap_or_else(Quat::identity);
-                        
-                    let scale = obj.get("Scale3D")
-                        .map(|v| Self::json_to_property_typed(v, "VectorProperty"))
-                        .and_then(|p| match p {
-                            Property::Vector(v) => Some(v),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| Vector::new(1.0, 1.0, 1.0));
-                        
-                    Property::Transform(Transform::new(location, rotation, scale))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "SoftObjectProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let asset_path = obj.get("AssetPathName")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let sub_path = obj.get("SubPathString")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    Property::SoftObjectPath(SoftObjectPath::new(asset_path, sub_path))
-                } else if let serde_json::Value::String(s) = value {
-                    Property::SoftObjectPath(SoftObjectPath::new(s, ""))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "SoftClassProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let asset_path = obj.get("AssetPathName")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let sub_path = obj.get("SubPathString")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    Property::SoftClassPath(SoftObjectPath::new(asset_path, sub_path))
-                } else if let serde_json::Value::String(s) = value {
-                    Property::SoftClassPath(SoftObjectPath::new(s, ""))
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "GuidProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    let a = obj.get("A").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    let b = obj.get("B").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    let c = obj.get("C").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    let d = obj.get("D").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    Property::Guid([a, b, c, d])
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "DateTimeProperty" => {
-                Property::DateTime(value.as_i64().unwrap_or(0))
-            },
-            "TimeSpanProperty" => {
-                Property::TimeSpan(value.as_i64().unwrap_or(0))
-            },
-            "ByteProperty" => {
-                if let serde_json::Value::Object(obj) = value {
-                    // Enum byte property
-                    let enum_type = obj.get("EnumType")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("None");
-                    let enum_value = obj.get("EnumValue")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("None");
-                    Property::ByteEnum {
-                        enum_type: FName::new(enum_type),
-                        value: FName::new(enum_value),
-                    }
-                } else {
-                    Property::Byte(value.as_u64().unwrap_or(0) as u8)
-                }
-            },
-            "ArrayProperty" => {
-                if let serde_json::Value::Array(arr) = value {
-                    let properties: Vec<Property> = arr.iter()
-                        .map(|v| ConversionUtils::json_to_property(v, None))
-                        .collect();
-                    Property::Array(properties)
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            "SetProperty" => {
-                if let serde_json::Value::Array(arr) = value {
-                    let properties: Vec<Property> = arr.iter()
-                        .map(|v| ConversionUtils::json_to_property(v, None))
-                        .collect();
-                    Property::Set(properties)
-                } else {
-                    Property::Unknown(value.clone())
-                }
-            },
-            _ => ConversionUtils::json_to_property(value, Some(type_hint)),
-        }
-    }
-    
-    /// Extract property type from CUE4Parse metadata
-    pub fn extract_property_type(json: &serde_json::Value, property_name: &str) -> Option<String> {
-        json.get("$types")
-            .and_then(|types| types.get(property_name))
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-    }
-    
-    /// Extract transform components from an actor export (Stove-specific)
-    pub fn extract_actor_transform(export: &Export) -> Transform {
-        let mut transform = Transform::identity();
-        
-        // Look for transform properties
-        for (prop_name, property) in &export.properties {
-            match prop_name.as_str() {
-                "RelativeLocation" | "ActorLocation" => {
-                    if let Property::Vector(location) = property {
-                        transform.location = location.clone();
-                    }
-                },
-                "RelativeRotation" | "ActorRotation" => {
-                    if let Property::Rotator(rotator) = property {
-                        // Convert rotator to quaternion (simplified conversion)
-                        let pitch = rotator.pitch.to_radians();
-                        let yaw = rotator.yaw.to_radians();
-                        let roll = rotator.roll.to_radians();
-                        
-                        let cp = (pitch / 2.0).cos();
-                        let sp = (pitch / 2.0).sin();
-                        let cy = (yaw / 2.0).cos();
-                        let sy = (yaw / 2.0).sin();
-                        let cr = (roll / 2.0).cos();
-                        let sr = (roll / 2.0).sin();
-                        
-                        transform.rotation = Quat::new(
-                            sr * cp * cy - cr * sp * sy,
-                            cr * sp * cy + sr * cp * sy,
-                            cr * cp * sy - sr * sp * cy,
-                            cr * cp * cy + sr * sp * sy,
-                        );
-                    }
-                },
-                "RelativeScale3D" | "ActorScale3D" => {
-                    if let Property::Vector(scale) = property {
-                        transform.scale = scale.clone();
-                    }
-                },
-                _ => {}
-            }
-        }
-        
-        transform
-    }
-    
-    /// Extract mesh component from an actor (Stove-specific)
-    pub fn find_mesh_component(asset: &Asset, actor_export: &Export) -> Option<String> {
-        // Look for mesh component references
-        for (prop_name, property) in &actor_export.properties {
-            if prop_name.contains("MeshComponent") || prop_name.contains("StaticMesh") {
-                match property {
-                    Property::Object(Some(package_index)) => {
-                        // Try to resolve the mesh reference
-                        if let Some(mesh_export) = asset.asset_data.exports.get((package_index.0 - 1) as usize) {
-                            if let Some(Property::SoftObjectPath(path)) = mesh_export.properties.get("StaticMesh") {
-                                return Some(path.asset_path.name.clone());
-                            }
-                        }
-                    },
-                    Property::SoftObjectPath(path) => {
-                        return Some(path.asset_path.name.clone());
-                    },
-                    _ => {}
-                }
-            }
-        }
-        None
-    }
-    
-    /// Extract material references from a mesh (Stove-specific)
-    pub fn extract_material_references(asset: &Asset) -> Vec<String> {
-        let mut materials = Vec::new();
-        
-        for export in &asset.asset_data.exports {
-            // Look for material properties
-            for (prop_name, property) in &export.properties {
-                if prop_name.to_lowercase().contains("material") {
-                    match property {
-                        Property::Object(Some(package_index)) => {
-                            // Resolve material reference
-                            if package_index.is_import() {
-                                if let Some(import_index) = package_index.import_index() {
-                                    if let Some(import) = asset.asset_data.imports.get(import_index) {
-                                        materials.push(import.object_name.name.clone());
-                                    }
-                                }
-                            }
-                        },
-                        Property::SoftObjectPath(path) => {
-                            materials.push(path.asset_path.name.clone());
-                        },
-                        _ => {}
-                    }
-                }
-            }
-        }
-        
-        materials
-    }
-    
-    /// Convert a property to a specific type (useful for UI editing)
-    pub fn property_to_value<T>(property: &Property) -> Option<T> 
-    where 
-        T: std::str::FromStr + Clone,
-    {
-        match property {
-            Property::String(s) => s.parse().ok(),
-            Property::Name(name) => name.name.parse().ok(),
-            _ => None,
-        }
-    }
-    
-    /// Get property as float for numerical editing (Stove-specific)
-    pub fn property_as_float(property: &Property) -> Option<f64> {
-        match property {
-            Property::Float(f) => Some(*f as f64),
-            Property::Double(d) => Some(*d),
-            Property::Int32(i) => Some(*i as f64),
-            Property::Int64(i) => Some(*i as f64),
-            _ => None,
-        }
-    }
-    
-    /// Set property from float value (Stove-specific) 
-    pub fn set_property_from_float(property: &mut Property, value: f64) {
-        match property {
-            Property::Float(f) => *f = value as f32,
-            Property::Double(d) => *d = value,
-            Property::Int32(i) => *i = value as i32,
-            Property::Int64(i) => *i = value as i64,
-            _ => {}
-        }
-    }
-    
-    /// Get all actor components for Stove-style editing
-    pub fn get_actor_components(asset: &Asset, actor_export_index: usize) -> Vec<usize> {
-        let mut components = Vec::new();
-        
-        if let Some(actor_export) = asset.asset_data.exports.get(actor_export_index) {
-            // Look for component references in the actor's properties
-            for (prop_name, property) in &actor_export.properties {
-                if prop_name.contains("Component") {
-                    if let Property::Object(Some(comp_ref)) = property {
-                        if comp_ref.is_export() {
-                            if let Some(comp_index) = comp_ref.export_index() {
-                                components.push(comp_index);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Also check BlueprintCreatedComponents array
-            if let Some(Property::Array(blueprint_components)) = actor_export.properties.get("BlueprintCreatedComponents") {
-                for comp in blueprint_components {
-                    if let Property::Object(Some(comp_ref)) = comp {
-                        if comp_ref.is_export() {
-                            if let Some(comp_index) = comp_ref.export_index() {
-                                components.push(comp_index);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        components
-    }
-    
-    /// Check if an export is an actor (Stove-compatible check)
-    pub fn is_actor_export(asset: &Asset, export_index: usize) -> bool {
-        if let Some(export) = asset.asset_data.exports.get(export_index) {
-            // Check class name through import table
-            if export.class_index.is_import() {
-                if let Some(import_idx) = export.class_index.import_index() {
-                    if let Some(import) = asset.asset_data.imports.get(import_idx) {
-                        return import.class_name.name.contains("Actor");
-                    }
-                }
-            }
-            
-            // Check for common actor properties
-            export.properties.contains_key("RootComponent") ||
-            export.properties.contains_key("RelativeLocation") ||
-            export.properties.contains_key("RelativeRotation") ||
-            export.properties.contains_key("RelativeScale3D")
-        } else {
-            false
-        }
-    }
-    
-    /// Get component transform relative to its parent (Stove-specific)
-    pub fn get_component_transform(asset: &Asset, component_export_index: usize) -> Option<Transform> {
-        let export = asset.asset_data.exports.get(component_export_index)?;
+    /// Get actor transform components (Stove compatibility)
+    pub fn get_actor_transform<C>(asset: &Asset<C>, export_index: usize) -> Option<Transform> {
+        let export = asset.asset_data.exports.get(export_index)?;
         
         let mut transform = Transform::identity();
         
-        // Look for relative transform properties
+        // Look for transform properties commonly used by Stove
         for (prop_name, property) in &export.properties {
-            match prop_name.as_str() {
-                "RelativeLocation" => {
-                    if let Property::Vector(location) = property {
-                        transform.location = location.clone();
-                    }
+            match (prop_name.as_str(), property) {
+                ("RelativeLocation" | "Location", Property::Vector(v)) => {
+                    transform.location = v.clone();
                 },
-                "RelativeRotation" => {
-                    if let Property::Rotator(rotation) = property {
-                        // Convert rotator to quaternion
-                        transform.rotation = Quat::new(
-                            rotation.pitch.to_radians() * 0.5,
-                            rotation.yaw.to_radians() * 0.5,
-                            rotation.roll.to_radians() * 0.5,
-                            1.0
-                        );
-                    }
+                ("RelativeRotation" | "Rotation", Property::Rotator(r)) => {
+                    // Convert rotator to quaternion (simplified conversion)
+                    transform.rotation = Quat::new(
+                        r.pitch.to_radians() * 0.5,
+                        r.yaw.to_radians() * 0.5, 
+                        r.roll.to_radians() * 0.5,
+                        1.0
+                    );
                 },
-                "RelativeScale3D" => {
-                    if let Property::Vector(scale) = property {
-                        transform.scale = scale.clone();
-                    }
+                ("RelativeScale3D" | "Scale3D", Property::Vector(s)) => {
+                    transform.scale = s.clone();
                 },
                 _ => {}
             }
@@ -7776,750 +7388,48 @@ impl ConversionUtils {
         Some(transform)
     }
     
-    /// Load asset with .usmap mappings for proper type resolution
-    /// 
-    /// This is critical for cooked builds where type information has been stripped.
-    /// .usmap files contain the mapping information needed to properly parse properties.
-    /// 
-    /// # Arguments
-    /// * `provider` - The CUE4Parse provider
-    /// * `asset_path` - Path to the asset to load
-    /// * `usmap_path` - Path to the .usmap file containing type mappings
-    /// 
-    /// # Examples
-    /// ```rust
-    /// use cue4parse_rs::unreal_asset::ConversionUtils;
-    /// 
-    /// // Essential for cooked builds - load mappings first
-    /// let asset = ConversionUtils::load_asset_with_mappings(
-    ///     &provider,
-    ///     "/Game/Maps/MainMenu.umap",
-    ///     "/path/to/Mappings.usmap"
-    /// )?;
-    /// 
-    /// // Now properties will have correct types instead of raw bytes
-    /// ```
-    pub fn load_asset_with_mappings(
-        provider: &mut Provider, 
-        asset_path: &str, 
-        usmap_path: &str
-    ) -> Result<Asset> {
-        // Set the mappings first - this is crucial for type resolution
-        let _ = provider.set_mappings(usmap_path);
-        
-        // Now load the asset with proper type information
-        Asset::from_cue4parse(provider, asset_path)
-    }
-    
-    /// Check if mappings are loaded in the provider
-    /// 
-    /// For cooked builds, you must have mappings loaded or properties
-    /// will appear as raw data instead of properly typed values.
-    pub fn has_mappings_loaded(_provider: &Provider) -> bool {
-        // Check if mappings have been set (implementation would depend on CUE4Parse API)
-        // For now, we'll assume they have been if the provider is valid
-        true // This would need actual CUE4Parse API to check mapping state
-    }
-    
-    /// Validate that an asset has proper type information
-    /// 
-    /// Returns true if the asset appears to have been loaded with proper mappings,
-    /// false if it looks like raw cooked data without type information.
-    pub fn validate_asset_types(asset: &Asset) -> bool {
-        // Check if we have recognizable property types instead of raw data
-        for export in &asset.asset_data.exports {
-            let has_typed_properties = export.properties.values().any(|prop| {
-                !matches!(prop, Property::Unknown(_))
-            });
-            
-            if !has_typed_properties && !export.properties.is_empty() {
-                return false; // Likely raw cooked data without mappings
-            }
-        }
-        
-        true
-    }
-    
-    /// Get suggested .usmap path based on asset path
-    /// 
-    /// Provides common patterns for locating .usmap files relative to asset paths.
-    /// This is helpful for Stove and other tools that need to automatically locate mappings.
-    /// 
-    /// # Arguments
-    /// * `asset_path` - Path to the asset
-    /// * `game_directory` - Root directory of the game
-    /// 
-    /// # Returns
-    /// Vector of possible .usmap file paths to try
-    pub fn suggest_usmap_paths(_asset_path: &str, game_directory: &str) -> Vec<String> {
-        let mut suggestions = Vec::new();
-        
-        // Common .usmap locations
-        suggestions.push(format!("{}/Mappings.usmap", game_directory));
-        suggestions.push(format!("{}/Content/Mappings.usmap", game_directory));
-        suggestions.push(format!("{}/Binaries/Mappings.usmap", game_directory));
-        suggestions.push(format!("{}/_mappings.usmap", game_directory));
-        
-        // Game-specific patterns
-        if game_directory.contains("Fortnite") {
-            suggestions.push(format!("{}/FortniteGame/Content/Mappings.usmap", game_directory));
-        }
-        
-        // Version-specific patterns
-        suggestions.push(format!("{}/mappings_v1.usmap", game_directory));
-        suggestions.push(format!("{}/mappings_latest.usmap", game_directory));
-        
-        suggestions
-    }
-    
-    /// Convert property using mapping information
-    /// 
-    /// When mappings are available, this can provide more accurate property conversion
-    /// than the standard json_to_property method.
-    pub fn convert_property_with_mapping(
-        value: &serde_json::Value, 
-        _property_name: &str,
-        _class_name: &str,
-        _mappings_loaded: bool // Future: use for enhanced conversion
-    ) -> Property {
-        // For now, fall back to standard conversion
-        // Future enhancement: use actual mapping data for better type inference
-        Self::json_to_property_typed(value, "Unknown")
-    }
-}
-
-/// Migration helper macros
-/// 
-/// Provides macros to ease migration from unreal_asset to CUE4Parse.
-#[cfg(feature = "unrealmodding-compat")]
-pub mod migration {
-    /// Create an Asset from CUE4Parse with error handling
-    /// 
-    /// # Example
-    /// ```rust,ignore
-    /// use cue4parse_rs::unreal_asset::migration::load_asset;
-    /// 
-    /// let asset = load_asset!(provider, "MyAsset.MyAsset")?;
-    /// ```
-    #[macro_export]
-    macro_rules! load_asset {
-        ($provider:expr, $path:expr) => {
-            crate::unreal_asset::Asset::from_cue4parse($provider, $path)
-        };
-    }
-    
-    /// Access properties with type checking
-    /// 
-    /// # Example
-    /// ```rust,ignore
-    /// use cue4parse_rs::unreal_asset::migration::get_property;
-    /// 
-    /// let value = get_property!(export, "MyProperty", String);
-    /// ```
-    #[macro_export]
-    macro_rules! get_property {
-        ($export:expr, $name:expr, String) => {
-            $export.properties.get($name)
-                .and_then(|p| match p {
-                    crate::unreal_asset::Property::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-        };
-        ($export:expr, $name:expr, i32) => {
-            $export.properties.get($name)
-                .and_then(|p| match p {
-                    crate::unreal_asset::Property::Int32(i) => Some(*i),
-                    _ => None,
-                })
-        };
-        ($export:expr, $name:expr, bool) => {
-            $export.properties.get($name)
-                .and_then(|p| match p {
-                    crate::unreal_asset::Property::Bool(b) => Some(*b),
-                    _ => None,
-                })
-        };
-    }
-}
-
-#[cfg(all(test, feature = "unrealmodding-compat"))]
-mod tests {
-    use super::*;
-    use crate::GameVersion;
-
-    #[test]
-    fn test_fname_creation() {
-        let fname = FName::new("TestName");
-        assert_eq!(fname.as_str(), "TestName");
-        assert_eq!(fname.number, 0);
-        assert_eq!(fname.to_string(), "TestName");
-        
-        let fname_with_number = FName::with_number("TestName", 5);
-        assert_eq!(fname_with_number.to_string(), "TestName_5");
-    }
-    
-    #[test]
-    fn test_package_index() {
-        let null_ref = PackageIndex::null();
-        assert!(null_ref.is_null());
-        assert!(!null_ref.is_import());
-        assert!(!null_ref.is_export());
-        
-        let import_ref = PackageIndex(-5);
-        assert!(import_ref.is_import());
-        assert_eq!(import_ref.import_index(), Some(4)); // -(-5) - 1 = 4
-        
-        let export_ref = PackageIndex(3);
-        assert!(export_ref.is_export());
-        assert_eq!(export_ref.export_index(), Some(2)); // 3 - 1 = 2
-    }
-    
-    #[test]
-    fn test_property_creation() {
-        let bool_prop = Property::Bool(true);
-        assert!(matches!(bool_prop, Property::Bool(true)));
-        
-        let string_prop = Property::String("test".to_string());
-        assert!(matches!(string_prop, Property::String(_)));
-        
-        let name_prop = Property::Name(FName::new("TestName"));
-        if let Property::Name(fname) = &name_prop {
-            assert_eq!(fname.as_str(), "TestName");
-        }
-    }
-    
-    #[test]
-    fn test_vector_operations() {
-        let vec = Vector::new(1.0, 2.0, 3.0);
-        assert_eq!(vec.x, 1.0);
-        assert_eq!(vec.y, 2.0);
-        assert_eq!(vec.z, 3.0);
-        
-        let zero = Vector::zero();
-        assert_eq!(zero.x, 0.0);
-        assert_eq!(zero.y, 0.0);
-        assert_eq!(zero.z, 0.0);
-    }
-    
-    #[test]
-    fn test_transform_operations() {
-        let transform = Transform::identity();
-        assert_eq!(transform.location, Vector::zero());
-        assert_eq!(transform.rotation, Quat::identity());
-        assert_eq!(transform.scale, Vector::new(1.0, 1.0, 1.0));
-    }
-    
-    #[test]
-    fn test_asset_creation() {
-        let asset: Asset<std::io::Cursor<Vec<u8>>> = Asset::new();
-        assert_eq!(asset.asset_data.object_name, "");
-        assert_eq!(asset.asset_data.exports.len(), 0);
-        assert_eq!(asset.asset_data.imports.len(), 0);
-    }
-    
-    #[test]
-    fn test_json_to_property_conversion() {
-        use serde_json::json;
-        
-        let bool_json = json!(true);
-        let prop = Asset::<std::io::Cursor<Vec<u8>>>::json_to_property(&bool_json, None);
-        assert!(matches!(prop, Property::Bool(true)));
-        
-        let string_json = json!("test_string");
-        let prop = Asset::<std::io::Cursor<Vec<u8>>>::json_to_property(&string_json, Some("Name"));
-        if let Property::Name(fname) = prop {
-            assert_eq!(fname.as_str(), "test_string");
-        } else {
-            panic!("Expected Name property");
-        }
-        
-        let number_json = json!(42);
-        let prop = Asset::<std::io::Cursor<Vec<u8>>>::json_to_property(&number_json, None);
-        assert!(matches!(prop, Property::Int32(42)));
-        
-        let array_json = json!([1, 2, 3]);
-        let prop = Asset::<std::io::Cursor<Vec<u8>>>::json_to_property(&array_json, None);
-        if let Property::Array(arr) = prop {
-            assert_eq!(arr.len(), 3);
-        } else {
-            panic!("Expected Array property");
-        }
-        
-        // Test vector conversion
-        let vector_json = json!({
-            "$type": "Vector",
-            "X": 1.0,
-            "Y": 2.0,
-            "Z": 3.0
-        });
-        let prop = Asset::<std::io::Cursor<Vec<u8>>>::json_to_property(&vector_json, None);
-        if let Property::Vector(vec) = prop {
-            assert_eq!(vec.x, 1.0);
-            assert_eq!(vec.y, 2.0);
-            assert_eq!(vec.z, 3.0);
-        } else {
-            panic!("Expected Vector property");
-        }
-    }
-    
-    #[test]
-    fn test_conversion_utils() {
-        let version_str = ConversionUtils::game_version_to_string(&GameVersion::UE5_3);
-        assert_eq!(version_str, "5.3.0");
-        
-        let version_str = ConversionUtils::game_version_to_string(&GameVersion::UE4_27);
-        assert_eq!(version_str, "4.27.0");
-    }
-    
-    #[test]
-    fn test_property_type_conversion() {
-        use serde_json::json;
-        
-        let bool_val = json!(true);
-        let prop = ConversionUtils::json_to_property_typed(&bool_val, "BoolProperty");
-        assert!(matches!(prop, Property::Bool(true)));
-        
-        let int_val = json!(42);
-        let prop = ConversionUtils::json_to_property_typed(&int_val, "IntProperty");
-        assert!(matches!(prop, Property::Int32(42)));
-        
-        let str_val = json!("test");
-        let prop = ConversionUtils::json_to_property_typed(&str_val, "StrProperty");
-        if let Property::String(s) = prop {
-            assert_eq!(s, "test");
-        } else {
-            panic!("Expected String property");
-        }
-        
-        // Test vector property conversion
-        let vector_val = json!({
-            "X": 1.5,
-            "Y": 2.5,
-            "Z": 3.5
-        });
-        let prop = ConversionUtils::json_to_property_typed(&vector_val, "VectorProperty");
-        if let Property::Vector(vec) = prop {
-            assert_eq!(vec.x, 1.5);
-            assert_eq!(vec.y, 2.5);
-            assert_eq!(vec.z, 3.5);
-        } else {
-            panic!("Expected Vector property");
-        }
-    }
-    
-    #[test]
-    fn test_mesh_data() {
-        let mut mesh = StaticMeshData::new();
-        assert_eq!(mesh.vertex_count(), 0);
-        assert_eq!(mesh.triangle_count(), 0);
-        
-        mesh.vertices = vec![
-            Vector::new(0.0, 0.0, 0.0),
-            Vector::new(1.0, 0.0, 0.0),
-            Vector::new(0.5, 1.0, 0.0),
-        ];
-        mesh.indices = vec![0, 1, 2];
-        
-        assert_eq!(mesh.vertex_count(), 3);
-        assert_eq!(mesh.triangle_count(), 1);
-    }
-    
-    #[test]
-    fn test_texture_data() {
-        let texture = Texture2DData::new(512, 512, "PF_DXT5".to_string());
-        assert_eq!(texture.width, 512);
-        assert_eq!(texture.height, 512);
-        assert_eq!(texture.format, "PF_DXT5");
-        assert!(texture.is_compressed());
-        
-        let uncompressed = Texture2DData::new(256, 256, "PF_B8G8R8A8".to_string());
-        assert!(!uncompressed.is_compressed());
-    }
-    
-    #[test]
-    fn test_soft_object_path() {
-        let path = SoftObjectPath::new("/Game/Meshes/SM_Rock", "");
-        assert_eq!(path.asset_path.name, "/Game/Meshes/SM_Rock");
-        assert_eq!(path.sub_path, "");
-        assert!(!path.is_null());
-        
-        let null_path = SoftObjectPath::new("", "");
-        assert!(null_path.is_null());
-    }
-    
-    #[test]
-    fn test_property_numeric_conversion() {
-        let float_prop = Property::Float(3.14);
-        assert_eq!(ConversionUtils::property_as_float(&float_prop), Some(3.14f64));
-        
-        let int_prop = Property::Int32(42);
-        assert_eq!(ConversionUtils::property_as_float(&int_prop), Some(42.0f64));
-        
-        let string_prop = Property::String("not a number".to_string());
-        assert_eq!(ConversionUtils::property_as_float(&string_prop), None);
-    }
-}
-
-#[cfg(feature = "unrealmodding-compat")]
-impl Asset {
-    /// Helper method to extract mesh vertices from LOD data
-    fn extract_mesh_vertices_from_lod(&self, mesh_data: &mut StaticMeshData, lod: &serde_json::Value) {
-        // Try multiple possible vertex data locations
-        let vertices_data = lod.get("Vertices")
-            .or_else(|| lod.get("VertexBuffer"))
-            .or_else(|| lod.get("PositionVertexBuffer"));
-            
-        if let Some(vertices) = vertices_data {
-            if let serde_json::Value::Array(vertex_array) = vertices {
-                for vertex in vertex_array {
-                    // Handle different vertex formats
-                    if let Some(pos) = vertex.get("Position") {
-                        self.extract_vector_from_json(&mut mesh_data.vertices, pos);
-                    } else if let (Some(x), Some(y), Some(z)) = (
-                        vertex.get("X").and_then(|v| v.as_f64()),
-                        vertex.get("Y").and_then(|v| v.as_f64()),
-                        vertex.get("Z").and_then(|v| v.as_f64())
-                    ) {
-                        mesh_data.vertices.push(Vector::new(x, y, z));
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract mesh indices from LOD data
-    fn extract_mesh_indices_from_lod(&self, mesh_data: &mut StaticMeshData, lod: &serde_json::Value) {
-        let indices_data = lod.get("Indices")
-            .or_else(|| lod.get("IndexBuffer"))
-            .or_else(|| lod.get("Triangles"));
-            
-        if let Some(indices) = indices_data {
-            if let serde_json::Value::Array(index_array) = indices {
-                for index in index_array {
-                    if let Some(idx) = index.as_u64() {
-                        mesh_data.indices.push(idx as u32);
-                    } else if let Some(idx) = index.as_i64() {
-                        mesh_data.indices.push(idx as u32);
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract UV coordinates from LOD data
-    fn extract_mesh_uvs_from_lod(&self, mesh_data: &mut StaticMeshData, lod: &serde_json::Value) {
-        let uvs_data = lod.get("UVs")
-            .or_else(|| lod.get("TextureCoordinates"))
-            .or_else(|| lod.get("TexCoords"));
-            
-        if let Some(uvs) = uvs_data {
-            if let serde_json::Value::Array(uv_channels) = uvs {
-                for channel in uv_channels {
-                    if let serde_json::Value::Array(uv_array) = channel {
-                        let mut channel_uvs = Vec::new();
-                        for uv in uv_array {
-                            if let (Some(u), Some(v)) = (
-                                uv.get("U").and_then(|v| v.as_f64()),
-                                uv.get("V").and_then(|v| v.as_f64())
-                            ) {
-                                channel_uvs.push(Vector2D::new(u, v));
-                            } else if let (Some(x), Some(y)) = (
-                                uv.get("X").and_then(|v| v.as_f64()),
-                                uv.get("Y").and_then(|v| v.as_f64())
-                            ) {
-                                channel_uvs.push(Vector2D::new(x, y));
-                            }
-                        }
-                        mesh_data.uv_channels.push(channel_uvs);
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract vertices from array format
-    fn extract_vertices_from_array(&self, mesh_data: &mut StaticMeshData, vertices: &serde_json::Value) {
-        if let serde_json::Value::Array(vertex_array) = vertices {
-            for vertex in vertex_array {
-                if let Some(pos) = vertex.get("Position") {
-                    self.extract_vector_from_json(&mut mesh_data.vertices, pos);
-                } else {
-                    self.extract_vector_from_json(&mut mesh_data.vertices, vertex);
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract indices from array format
-    fn extract_indices_from_array(&self, mesh_data: &mut StaticMeshData, indices: &serde_json::Value) {
-        if let serde_json::Value::Array(index_array) = indices {
-            for index in index_array {
-                if let Some(idx) = index.as_u64() {
-                    mesh_data.indices.push(idx as u32);
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract UVs from array format
-    fn extract_uvs_from_array(&self, mesh_data: &mut StaticMeshData, uvs: &serde_json::Value) {
-        if let serde_json::Value::Array(uv_channels) = uvs {
-            for channel in uv_channels {
-                if let serde_json::Value::Array(uv_array) = channel {
-                    let mut channel_uvs = Vec::new();
-                    for uv in uv_array {
-                        if let (Some(u), Some(v)) = (
-                            uv.get("U").and_then(|v| v.as_f64()),
-                            uv.get("V").and_then(|v| v.as_f64())
-                        ) {
-                            channel_uvs.push(Vector2D::new(u, v));
-                        }
-                    }
-                    mesh_data.uv_channels.push(channel_uvs);
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract material references
-    fn extract_material_references(&self, mesh_data: &mut StaticMeshData, materials: &serde_json::Value) {
-        if let serde_json::Value::Array(material_array) = materials {
-            for material in material_array {
-                // Handle different material reference formats
-                if let Some(material_ref) = material.get("MaterialInterface") {
-                    if let Some(name) = material_ref.as_str() {
-                        mesh_data.materials.push(name.to_string());
-                    } else if let Some(obj) = material_ref.as_object() {
-                        if let Some(asset_path) = obj.get("AssetPathName") {
-                            if let Some(path_str) = asset_path.as_str() {
-                                mesh_data.materials.push(path_str.to_string());
-                            }
-                        }
-                    }
-                } else if let Some(name) = material.as_str() {
-                    mesh_data.materials.push(name.to_string());
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract mesh bounds
-    fn extract_mesh_bounds(&self, mesh_data: &mut StaticMeshData, bounds: &serde_json::Value) {
-        // Extract bounding box information for mesh optimization
-        if let (Some(min), Some(max)) = (bounds.get("Min"), bounds.get("Max")) {
-            if let (Some(min_vec), Some(max_vec)) = (
-                self.json_to_vector(min),
-                self.json_to_vector(max)
-            ) {
-                // Store bounds as custom metadata (could extend StaticMeshData for this)
-                mesh_data.materials.push(format!("Bounds: Min({:.2},{:.2},{:.2}) Max({:.2},{:.2},{:.2})", 
-                    min_vec.x, min_vec.y, min_vec.z, max_vec.x, max_vec.y, max_vec.z));
-            }
-        }
-    }
-    
-    /// Helper method to extract a Vector from JSON
-    fn extract_vector_from_json(&self, target: &mut Vec<Vector>, json: &serde_json::Value) {
-        if let Some(vector) = self.json_to_vector(json) {
-            target.push(vector);
-        }
-    }
-    
-    /// Helper method to convert JSON to Vector
-    fn json_to_vector(&self, json: &serde_json::Value) -> Option<Vector> {
-        if let (Some(x), Some(y), Some(z)) = (
-            json.get("X").and_then(|v| v.as_f64()),
-            json.get("Y").and_then(|v| v.as_f64()),
-            json.get("Z").and_then(|v| v.as_f64())
-        ) {
-            Some(Vector::new(x, y, z))
-        } else {
-            None
-        }
-    }
-    
-    /// Helper method to extract texture references from material expressions
-    fn extract_material_textures_from_expressions(&self, material_data: &mut MaterialData, expressions: &serde_json::Value) {
-        if let serde_json::Value::Array(expr_array) = expressions {
-            for expr in expr_array {
-                if let Some(texture_obj) = expr.get("Texture") {
-                    if let Some(texture_name) = texture_obj.get("AssetPathName").and_then(|v| v.as_str()) {
-                        let slot_name = expr.get("Desc").and_then(|v| v.as_str()).unwrap_or("BaseColor");
-                        material_data.textures.insert(slot_name.to_string(), texture_name.to_string());
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract scalar parameters from material
-    fn extract_scalar_parameters(&self, material_data: &mut MaterialData, params: &serde_json::Value) {
-        if let serde_json::Value::Array(param_array) = params {
-            for param in param_array {
-                if let (Some(name), Some(value)) = (
-                    param.get("ParameterName").and_then(|v| v.as_str()),
-                    param.get("ParameterValue").and_then(|v| v.as_f64())
-                ) {
-                    material_data.scalar_parameters.insert(name.to_string(), value as f32);
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract vector parameters from material
-    fn extract_vector_parameters(&self, material_data: &mut MaterialData, params: &serde_json::Value) {
-        if let serde_json::Value::Array(param_array) = params {
-            for param in param_array {
-                if let Some(name) = param.get("ParameterName").and_then(|v| v.as_str()) {
-                    if let Some(value_obj) = param.get("ParameterValue") {
-                        if let (Some(r), Some(g), Some(b), Some(a)) = (
-                            value_obj.get("R").and_then(|v| v.as_f64()),
-                            value_obj.get("G").and_then(|v| v.as_f64()),
-                            value_obj.get("B").and_then(|v| v.as_f64()),
-                            value_obj.get("A").and_then(|v| v.as_f64())
-                        ) {
-                            material_data.vector_parameters.insert(
-                                name.to_string(), 
-                                LinearColor::new(r as f32, g as f32, b as f32, a as f32)
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract texture parameters from material
-    fn extract_texture_parameters(&self, material_data: &mut MaterialData, params: &serde_json::Value) {
-        if let serde_json::Value::Array(param_array) = params {
-            for param in param_array {
-                if let (Some(name), Some(texture_obj)) = (
-                    param.get("ParameterName").and_then(|v| v.as_str()),
-                    param.get("ParameterValue")
-                ) {
-                    if let Some(texture_name) = texture_obj.get("AssetPathName").and_then(|v| v.as_str()) {
-                        material_data.textures.insert(name.to_string(), texture_name.to_string());
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract boolean parameters from material
-    fn extract_boolean_parameters(&self, material_data: &mut MaterialData, params: &serde_json::Value) {
-        if let serde_json::Value::Array(param_array) = params {
-            for param in param_array {
-                if let (Some(name), Some(value)) = (
-                    param.get("ParameterName").and_then(|v| v.as_str()),
-                    param.get("Value").and_then(|v| v.as_bool())
-                ) {
-                    material_data.boolean_parameters.insert(name.to_string(), value);
-                }
-            }
-        }
-    }
-    
-    /// Helper method to extract texture platform data
-    fn extract_texture_platform_data(&self, texture_data: &mut Texture2DData, platform_data: &serde_json::Value) {
-        if let Some(mips) = platform_data.get("Mips") {
-            self.extract_texture_mips(texture_data, mips);
-        }
-    }
-    
-    /// Helper method to extract texture mips
-    fn extract_texture_mips(&self, texture_data: &mut Texture2DData, mips: &serde_json::Value) {
-        if let serde_json::Value::Array(mip_array) = mips {
-            texture_data.mip_count = mip_array.len() as u32;
-            
-            // Extract data from first mip level
-            if let Some(first_mip) = mip_array.get(0) {
-                if let Some(bulk_data) = first_mip.get("BulkData") {
-                    if let Some(data) = bulk_data.get("Data") {
-                        if let serde_json::Value::Array(data_array) = data {
-                            texture_data.data = data_array
-                                .iter()
-                                .filter_map(|v| v.as_u64().map(|u| u as u8))
-                                .collect();
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Helper method to check if an export represents an actor
-    fn is_actor_export(&self, export: &Export) -> bool {
-        export.object_name.name.contains("Actor") ||
-        export.properties.contains_key("RootComponent") ||
-        export.properties.contains_key("ActorLocation") ||
-        export.properties.contains_key("RelativeLocation") ||
-        export.extras.as_ref()
-            .and_then(|e| e.get("Type"))
-            .and_then(|t| t.as_str())
-            .map(|t| t.contains("Actor"))
-            .unwrap_or(false)
-    }
-    
-    /// Helper method to build ActorData from an export
-    fn build_actor_from_export(&self, export: &Export) -> Result<ActorData> {
-        let mut actor = ActorData {
-            name: export.object_name.name.clone(),
-            class: "Actor".to_string(), // Would need class resolution for proper type
-            transform: Transform::identity(),
-            properties: export.properties.clone(),
-            components: Vec::new(),
-        };
-        
-        // Extract transform information from properties
-        if let Some(Property::Vector(location)) = export.properties.get("ActorLocation")
-            .or_else(|| export.properties.get("RelativeLocation")) {
-            actor.transform.location = location.clone();
-        }
-        
-        if let Some(Property::Rotator(rotation)) = export.properties.get("ActorRotation")
-            .or_else(|| export.properties.get("RelativeRotation")) {
-            // Convert Rotator to Quaternion
-            actor.transform.rotation = Quat::from_euler(
-                rotation.roll as f64 * std::f64::consts::PI / 180.0,
-                rotation.pitch as f64 * std::f64::consts::PI / 180.0, 
-                rotation.yaw as f64 * std::f64::consts::PI / 180.0
+    /// Set actor transform components (Stove compatibility)
+    pub fn set_actor_transform<C>(asset: &mut Asset<C>, export_index: usize, transform: &Transform) -> bool {
+        if let Some(export) = asset.asset_data.exports.get_mut(export_index) {
+            // Set location
+            export.properties.insert(
+                "RelativeLocation".to_string(),
+                Property::Vector(transform.location.clone())
             );
+            
+            // Set rotation (convert from quaternion to rotator)
+            let (roll, pitch, yaw) = quaternion_to_euler(&transform.rotation);
+            export.properties.insert(
+                "RelativeRotation".to_string(),
+                Property::Rotator(Rotator::new(pitch, yaw, roll))
+            );
+            
+            // Set scale
+            export.properties.insert(
+                "RelativeScale3D".to_string(),
+                Property::Vector(transform.scale.clone())
+            );
+            
+            true
+        } else {
+            false
         }
+    }
+    
+    /// Find mesh component for an actor (Stove-specific)
+    pub fn find_mesh_component<C>(asset: &Asset<C>, actor_export_index: usize) -> Option<usize> {
+        let actor_export = asset.asset_data.exports.get(actor_export_index)?;
         
-        if let Some(Property::Vector(scale)) = export.properties.get("ActorScale3D")
-            .or_else(|| export.properties.get("RelativeScale3D")) {
-            actor.transform.scale = scale.clone();
-        }
-        
-        // Extract component references
-        if let Some(Property::Object(Some(root_comp))) = export.properties.get("RootComponent") {
-            // Would need to resolve component references to get full component hierarchy
-            let component = ComponentData {
-                name: format!("RootComponent_{}", root_comp.0),
-                class: "SceneComponent".to_string(),
-                properties: IndexMap::new(),
-            };
-            actor.components.push(component);
-        }
-        
-        // Extract additional actor-specific properties from extras if available
-        if let Some(extras) = &export.extras {
-            if let Some(components) = extras.get("Components") {
-                if let serde_json::Value::Array(comp_array) = components {
-                    for comp in comp_array {
-                        if let Some(comp_name) = comp.get("Name").and_then(|v| v.as_str()) {
-                            let component = ComponentData {
-                                name: comp_name.to_string(),
-                                class: comp.get("Class").and_then(|v| v.as_str()).unwrap_or("ActorComponent").to_string(),
-                                properties: IndexMap::new(),
-                            };
-                            actor.components.push(component);
-                        }
+        // Look for RootComponent or StaticMeshComponent references
+        for (prop_name, property) in &actor_export.properties {
+            if prop_name.contains("Mesh") || prop_name == "RootComponent" {
+                if let Property::Object(Some(component_ref)) = property {
+                    if component_ref.is_export() {
+                        return component_ref.export_index();
                     }
                 }
             }
         }
-        
-        Ok(actor)
+        None
     }
 }
