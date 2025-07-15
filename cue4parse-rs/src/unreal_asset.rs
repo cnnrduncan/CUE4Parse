@@ -193,6 +193,17 @@ pub mod unversioned {
 #[cfg(feature = "unrealmodding-compat")]
 pub mod containers {
     pub use super::{SharedResource, NameMap};
+    
+    /// Container trait for version information
+    pub trait Container {
+        fn get_version(&self) -> i32;
+    }
+    
+    impl Container for crate::unreal_asset::Ancestry {
+        fn get_version(&self) -> i32 {
+            self.get_version()
+        }
+    }
 }
 
 // ============================================================================
@@ -277,6 +288,67 @@ impl PackageIndexTrait for PackageIndex {
     fn is_null(&self) -> bool { PackageIndex::is_null(self) }
     fn is_import(&self) -> bool { PackageIndex::is_import(self) }
     fn is_export(&self) -> bool { PackageIndex::is_export(self) }
+}
+
+// ============================================================================
+// MISSING CORE TYPES - Stove Compatibility
+// ============================================================================
+
+/// Guid type for original unreal_asset compatibility
+#[cfg(feature = "unrealmodding-compat")]
+pub type Guid = [u32; 4];
+
+/// SharedResource type for original unreal_asset compatibility
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedResource<T> {
+    pub data: T,
+    pub is_loaded: bool,
+}
+
+#[cfg(feature = "unrealmodding-compat")]
+impl<T> SharedResource<T> {
+    pub fn new(data: T) -> Self {
+        Self { data, is_loaded: true }
+    }
+    
+    pub fn get(&self) -> &T {
+        &self.data
+    }
+    
+    pub fn get_ref(&self) -> &T {
+        &self.data
+    }
+    
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.data
+    }
+}
+
+/// NameMap type for original unreal_asset compatibility
+#[cfg(feature = "unrealmodding-compat")]
+pub type NameMap = Vec<String>;
+
+/// Ancestry type for original unreal_asset compatibility
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ancestry {
+    pub ancestry: Vec<String>,
+}
+
+#[cfg(feature = "unrealmodding-compat")]
+impl Ancestry {
+    pub fn new() -> Self {
+        Self { ancestry: Vec::new() }
+    }
+    
+    pub fn from_vec(ancestry: Vec<String>) -> Self {
+        Self { ancestry }
+    }
+    
+    pub fn get_version(&self) -> i32 {
+        self.ancestry.len() as i32
+    }
 }
 
 // ============================================================================
@@ -780,8 +852,49 @@ impl Asset {
         let name_count = asset_data.name_map.len() as i32;
         
         // Create asset with all Phase 2 features
-        Ok(Asset {
+        let default_summary = PackageSummary {
+            tag: 0x9E2A83C1,
+            legacy_file_version: -4,
+            legacy_ue3_version: 0,
+            file_version_ue4: -4,
+            file_version_ue5: 0,
+            total_header_size: 0,
+            folder_name: "Test".to_string(),
+            package_flags: 0,
+            name_count: 0,
+            name_offset: 0,
+            gatherable_text_data_count: 0,
+            gatherable_text_data_offset: 0,
+            export_count: 1,
+            export_offset: 0,
+            import_count: 0,
+            import_offset: 0,
+            depends_offset: 0,
+            soft_package_references_count: 0,
+            soft_package_references_offset: 0,
+            searchable_names_offset: 0,
+            thumbnail_table_offset: 0,
+            guid: Uuid::new_v4(),
+            generations: vec![GenerationInfo { export_count: 1, name_count }],
+            saved_by_engine_version: EngineVersion::VER_UE4_27,
+            compatible_with_engine_version: EngineVersion::VER_UE4_27,
+            compression_flags: 0,
+            asset_registry_data_offset: 0,
+            bulk_data_start_offset: 0,
+            world_tile_info_data_offset: 0,
+            chunk_ids: vec![],
+            preload_dependency_count: 0,
+            preload_dependency_offset: 0,
+        };
+        
+        let mut asset = Asset {
             asset_data,
+            // Compatibility fields
+            name_map: vec![],
+            import_map: vec![],
+            export_map: vec![],
+            package_summary: default_summary,
+            // Main fields
             legacy_file_version: -4,
             info: "Phase 2 Test Asset - Binary I/O, Properties, Package Resolution".to_string(),
             generations: vec![
@@ -806,7 +919,9 @@ impl Asset {
             object_version_ue5: ObjectVersionUE5::new(0),
             mappings: None,
             _phantom: std::marker::PhantomData,
-        })
+        };
+        asset.sync_compatibility_fields();
+        Ok(asset)
     }
 }
 
@@ -2056,8 +2171,48 @@ impl Asset {
         // Initialize bulk data manager
         let bulk_data_manager = BulkDataManager::new();
         
-        Ok(Asset {
+        let default_summary = PackageSummary {
+            tag: 0x9E2A83C1,
+            legacy_file_version: -4,
+            legacy_ue3_version: 0,
+            file_version_ue4: -4,
+            file_version_ue5: 0,
+            total_header_size: 0,
+            folder_name: "Game".to_string(),
+            package_flags: 0,
+            name_count: 0,
+            name_offset: 0,
+            gatherable_text_data_count: 0,
+            gatherable_text_data_offset: 0,
+            export_count: 0,
+            export_offset: 0,
+            import_count: 0,
+            import_offset: 0,
+            depends_offset: 0,
+            soft_package_references_count: 0,
+            soft_package_references_offset: 0,
+            searchable_names_offset: 0,
+            thumbnail_table_offset: 0,
+            guid: Uuid::new_v4(),
+            generations: Vec::new(),
+            saved_by_engine_version: engine_version,
+            compatible_with_engine_version: engine_version,
+            compression_flags: 0,
+            asset_registry_data_offset: 0,
+            bulk_data_start_offset: 0,
+            world_tile_info_data_offset: 0,
+            chunk_ids: vec![],
+            preload_dependency_count: 0,
+            preload_dependency_offset: 0,
+        };
+        
+        let mut asset = Asset {
             asset_data,
+            // Compatibility fields
+            name_map: vec![],
+            import_map: vec![],
+            export_map: vec![],
+            package_summary: default_summary,
             legacy_file_version: -4,
             info: format!("Asset with Phase 3 features - Game: {}", game_name.unwrap_or("Unknown")),
             generations: Vec::new(),
@@ -2077,7 +2232,9 @@ impl Asset {
             object_version_ue5: ObjectVersionUE5::new(if engine_version >= EngineVersion::VER_UE5_0 { 1 } else { 0 }),
             mappings: None,
             _phantom: std::marker::PhantomData,
-        })
+        };
+        asset.sync_compatibility_fields();
+        Ok(asset)
     }
     
     /// Demonstrate all Phase 3 advanced features
@@ -2478,6 +2635,9 @@ pub enum EngineVersion {
     VER_UE4_26 = 523,
     VER_UE4_27 = 524,
     
+    /// Automatic version plus one (used for version detection)
+    VER_UE4_AUTOMATIC_VERSION_PLUS_ONE = 525,
+    
     // UE5 versions
     VER_UE5_0 = 1001,
     VER_UE5_1 = 1002,
@@ -2510,6 +2670,48 @@ impl EngineVersion {
     pub fn version(&self) -> i32 {
         *self as i32
     }
+    
+    /// Check if this is a UE4 version
+    pub fn is_ue4(&self) -> bool {
+        let version = *self as i32;
+        version >= EngineVersion::VER_UE4_0 as i32 && version <= EngineVersion::VER_UE4_AUTOMATIC_VERSION_PLUS_ONE as i32
+    }
+    
+    /// Check if this is a UE5 version
+    pub fn is_ue5(&self) -> bool {
+        let version = *self as i32;
+        version >= EngineVersion::VER_UE5_0 as i32 && version <= EngineVersion::VER_UE5_5 as i32
+    }
+}
+
+/// Game engine version wrapper for pattern matching compatibility
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameEngineVersion {
+    /// UE4 game version
+    GAME_UE4(EngineVersion),
+    /// UE5 game version
+    GAME_UE5(EngineVersion),
+}
+
+#[cfg(feature = "unrealmodding-compat")]
+impl GameEngineVersion {
+    /// Create from engine version
+    pub fn from_engine_version(version: EngineVersion) -> Self {
+        if version.is_ue4() {
+            GameEngineVersion::GAME_UE4(version)
+        } else {
+            GameEngineVersion::GAME_UE5(version)
+        }
+    }
+    
+    /// Get inner engine version
+    pub fn engine_version(&self) -> EngineVersion {
+        match self {
+            GameEngineVersion::GAME_UE4(v) => *v,
+            GameEngineVersion::GAME_UE5(v) => *v,
+        }
+    }
 }
 
 // ============================================================================
@@ -2536,39 +2738,7 @@ impl ObjectVersion {
 // CONTAINERS MODULE
 // ============================================================================
 
-/// Shared resource for managing shared data
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone)]
-pub struct SharedResource<T> {
-    data: std::rc::Rc<T>,
-}
 
-#[cfg(feature = "unrealmodding-compat")]
-impl<T> SharedResource<T> {
-    pub fn new(data: T) -> Self {
-        Self {
-            data: std::rc::Rc::new(data),
-        }
-    }
-    
-    pub fn get(&self) -> &T {
-        &self.data
-    }
-    
-    pub fn get_ref(&self) -> &T {
-        &self.data
-    }
-    
-    pub fn get_mut(&self) -> std::cell::RefMut<T> {
-        // For a proper implementation, this would use RefCell
-        // For now, we'll panic as this is not properly implemented
-        panic!("SharedResource::get_mut not properly implemented - would need RefCell<T>")
-    }
-}
-
-/// Name map for string management
-#[cfg(feature = "unrealmodding-compat")]
-pub type NameMap = Vec<String>;
 
 // ============================================================================
 // FNAME MODULE  
@@ -2921,6 +3091,91 @@ impl SoftObjectPath {
     }
 }
 
+// ============================================================================
+// STOVE COMPATIBILITY PROPERTY TYPES
+// ============================================================================
+
+/// Array property compatible with original unreal_asset
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArrayProperty {
+    pub array_type: String,
+    pub values: Vec<Property>,
+}
+
+/// Map property compatible with original unreal_asset
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapProperty {
+    pub key_type: String,
+    pub value_type: String,
+    pub entries: Vec<(Property, Property)>,
+}
+
+/// Set property compatible with original unreal_asset
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetProperty {
+    pub element_type: String,
+    pub values: Vec<Property>,
+}
+
+/// Struct property compatible with original unreal_asset
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructProperty {
+    pub struct_type: FName,
+    pub struct_guid: Option<[u32; 4]>,
+    pub properties: IndexMap<String, Property>,
+}
+
+/// Object property compatible with original unreal_asset
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectProperty {
+    pub value: Option<PackageIndex>,
+}
+
+/// Soft object property compatible with original unreal_asset
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoftObjectProperty {
+    pub value: SoftObjectPath,
+}
+
+/// Enum property compatible with original unreal_asset
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnumProperty {
+    pub enum_type: FName,
+    pub value: FName,
+}
+
+/// Byte property value types compatible with original unreal_asset
+#[cfg(feature = "unrealmodding-compat")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BytePropertyValue {
+    /// Regular byte value
+    Byte(u8),
+    /// Enum byte value
+    Enum {
+        enum_type: FName,
+        value: FName,
+    },
+}
+
+/// Vector property for original unreal_asset compatibility
+#[cfg(feature = "unrealmodding-compat")]
+pub type VectorProperty = Vector;
+
+/// Rotator property for original unreal_asset compatibility
+#[cfg(feature = "unrealmodding-compat")]  
+pub type RotatorProperty = Rotator;
+
+/// Soft object path property value for original unreal_asset compatibility
+#[cfg(feature = "unrealmodding-compat")]
+pub type SoftObjectPathPropertyValue = SoftObjectPath;
+
 /// Property value types compatible with unreal_asset
 /// 
 /// Represents the different types of properties that can exist in Unreal Engine assets.
@@ -3147,6 +3402,7 @@ impl PropertyDataTrait for Property {
             Property::Blueprint(_) => "BlueprintProperty",
             Property::WorldContext(_) => "WorldContextProperty",
             Property::LandscapeComponent(_) => "LandscapeComponentProperty",
+            
             Property::ByteEnum { .. } => "ByteProperty",
             Property::Byte(_) => "ByteProperty",
             Property::Unknown(_) => "Unknown",
@@ -3210,6 +3466,7 @@ impl PropertyDataTrait for Property {
                 "AssetPath": path.asset_path.to_serialized_name(),
                 "SubPath": path.sub_path
             }),
+            
             Property::Unknown(v) => v.clone(),
             _ => serde_json::Value::Null,
         }
@@ -3724,61 +3981,7 @@ impl Property {
         }
     }
 
-/// Struct property implementation
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructProperty {
-    pub struct_type: String,
-    pub properties: IndexMap<String, Property>,
-}
 
-#[cfg(feature = "unrealmodding-compat")]
-impl StructProperty {
-    pub fn new(struct_type: String) -> Self {
-        Self {
-            struct_type,
-            properties: IndexMap::new(),
-        }
-    }
-}
-
-/// Vector property implementation
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VectorProperty {
-    pub value: Vector,
-}
-
-/// Rotator property implementation
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RotatorProperty {
-    pub value: Rotator,
-}
-
-/// Array property implementation
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArrayProperty {
-    pub array_type: String,
-    pub values: Vec<Property>,
-}
-
-/// Byte property value for enum-like bytes
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum BytePropertyValue {
-    Byte(u8),
-    Enum(FName),
-}
-
-/// Soft object path property value
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SoftObjectPathPropertyValue {
-    pub asset_path: FName,
-    pub sub_path: String,
-}
 
 // ============================================================================
 // CAST MACRO for type casting between property types
@@ -4004,6 +4207,92 @@ pub struct PackageSummary {
     pub chunk_ids: Vec<i32>,
     pub preload_dependency_count: i32,
     pub preload_dependency_offset: u32,
+}
+
+#[cfg(feature = "unrealmodding-compat")]
+impl PackageSummary {
+    /// Create a new PackageSummary from AssetData
+    pub fn from_asset_data(asset_data: &AssetData) -> Self {
+        Self {
+            tag: 0x9E2A83C1,
+            legacy_file_version: -4,
+            legacy_ue3_version: 0,
+            file_version_ue4: -4,
+            file_version_ue5: 0,
+            total_header_size: asset_data.total_header_size,
+            folder_name: "None".to_string(),
+            package_flags: asset_data.package_flags,
+            name_count: asset_data.name_map.len() as i32,
+            name_offset: 0,
+            gatherable_text_data_count: 0,
+            gatherable_text_data_offset: 0,
+            export_count: asset_data.exports.len() as i32,
+            export_offset: 0,
+            import_count: asset_data.imports.len() as i32,
+            import_offset: 0,
+            depends_offset: 0,
+            soft_package_references_count: 0,
+            soft_package_references_offset: 0,
+            searchable_names_offset: 0,
+            thumbnail_table_offset: 0,
+            guid: asset_data.package_guid.unwrap_or_else(|| Uuid::new_v4()),
+            generations: vec![
+                GenerationInfo {
+                    export_count: asset_data.exports.len() as i32,
+                    name_count: asset_data.name_map.len() as i32,
+                }
+            ],
+            saved_by_engine_version: EngineVersion::VER_UE4_27,
+            compatible_with_engine_version: EngineVersion::VER_UE4_27,
+            compression_flags: 0,
+            asset_registry_data_offset: 0,
+            bulk_data_start_offset: 0,
+            world_tile_info_data_offset: 0,
+            chunk_ids: vec![],
+            preload_dependency_count: 0,
+            preload_dependency_offset: 0,
+        }
+    }
+}
+
+#[cfg(feature = "unrealmodding-compat")]
+impl Default for PackageSummary {
+    fn default() -> Self {
+        Self {
+            tag: 0x9E2A83C1,
+            legacy_file_version: -4,
+            legacy_ue3_version: 0,
+            file_version_ue4: -4,
+            file_version_ue5: 0,
+            total_header_size: 0,
+            folder_name: String::new(),
+            package_flags: 0,
+            name_count: 0,
+            name_offset: 0,
+            gatherable_text_data_count: 0,
+            gatherable_text_data_offset: 0,
+            export_count: 0,
+            export_offset: 0,
+            import_count: 0,
+            import_offset: 0,
+            depends_offset: 0,
+            soft_package_references_count: 0,
+            soft_package_references_offset: 0,
+            searchable_names_offset: 0,
+            thumbnail_table_offset: 0,
+            guid: Uuid::new_v4(),
+            generations: Vec::new(),
+            saved_by_engine_version: EngineVersion::VER_UE4_27,
+            compatible_with_engine_version: EngineVersion::VER_UE4_27,
+            compression_flags: 0,
+            asset_registry_data_offset: 0,
+            bulk_data_start_offset: 0,
+            world_tile_info_data_offset: 0,
+            chunk_ids: vec![],
+            preload_dependency_count: 0,
+            preload_dependency_offset: 0,
+        }
+    }
 }
 
 #[cfg(feature = "unrealmodding-compat")]
@@ -4419,8 +4708,48 @@ impl<R: Read + Seek> BinaryAssetReader<R> {
             asset_data.exports.push(export);
         }
         
-        Ok(Asset {
+        let default_summary = PackageSummary {
+            tag: 0x9E2A83C1,
+            legacy_file_version: -4,
+            legacy_ue3_version: 0,
+            file_version_ue4: -4,
+            file_version_ue5: 0,
+            total_header_size: 0,
+            folder_name: String::new(),
+            package_flags: 0,
+            name_count: 0,
+            name_offset: 0,
+            gatherable_text_data_count: 0,
+            gatherable_text_data_offset: 0,
+            export_count: asset_data.exports.len() as i32,
+            export_offset: 0,
+            import_count: asset_data.imports.len() as i32,
+            import_offset: 0,
+            depends_offset: 0,
+            soft_package_references_count: 0,
+            soft_package_references_offset: 0,
+            searchable_names_offset: 0,
+            thumbnail_table_offset: 0,
+            guid: Uuid::new_v4(),
+            generations: Vec::new(),
+            saved_by_engine_version: self.engine_version,
+            compatible_with_engine_version: self.engine_version,
+            compression_flags: 0,
+            asset_registry_data_offset: 0,
+            bulk_data_start_offset: 0,
+            world_tile_info_data_offset: 0,
+            chunk_ids: vec![],
+            preload_dependency_count: 0,
+            preload_dependency_offset: 0,
+        };
+        
+        let mut asset = Asset {
             asset_data,
+            // Compatibility fields
+            name_map: vec![],
+            import_map: vec![],
+            export_map: vec![],
+            package_summary: default_summary,
             legacy_file_version: -4,
             info: "Loaded from binary UE4/UE5 format".to_string(),
             generations: Vec::new(),
@@ -4440,7 +4769,9 @@ impl<R: Read + Seek> BinaryAssetReader<R> {
             object_version_ue5: self.object_version_ue5,
             mappings: self.mappings,
             _phantom: std::marker::PhantomData,
-        })
+        };
+        asset.sync_compatibility_fields();
+        Ok(asset)
     }
 }
 
@@ -4818,7 +5149,7 @@ pub trait ArchiveTrait<Index: PackageIndexTrait>: Seek {
 
     /// Add a string slice to this archive as an `FName`, `FName` number will be 0
     fn add_fname(&mut self, value: &str) -> FName {
-        let binding = self.get_name_map();
+        let mut binding = self.get_name_map();
         let mut name_map = binding.get_mut();
         if let Some(_index) = name_map.iter().position(|n| n == value) {
             FName::new(value)
@@ -4830,7 +5161,7 @@ pub trait ArchiveTrait<Index: PackageIndexTrait>: Seek {
     
     /// Add a string slice to this archive as an `FName`
     fn add_fname_with_number(&mut self, value: &str, number: i32) -> FName {
-        let binding = self.get_name_map();
+        let mut binding = self.get_name_map();
         let mut name_map = binding.get_mut();
         if let Some(_index) = name_map.iter().position(|n| n == value) {
             FName::with_number(value, number as u32)
@@ -5411,33 +5742,7 @@ impl<W: Write + Seek> ArchiveWriter<PackageIndex> for BinaryArchiveWriter<W> {}
 // UNVERSIONED MODULE - Ancestry
 // ============================================================================
 
-/// Ancestry information for unversioned properties
-#[cfg(feature = "unrealmodding-compat")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ancestry {
-    /// Ancestor class names
-    pub ancestors: Vec<String>,
-}
 
-#[cfg(feature = "unrealmodding-compat")]
-impl Ancestry {
-    /// Create new ancestry
-    pub fn new() -> Self {
-        Self {
-            ancestors: Vec::new(),
-        }
-    }
-    
-    /// Add ancestor
-    pub fn add_ancestor(&mut self, ancestor: String) {
-        self.ancestors.push(ancestor);
-    }
-    
-    /// Check if has ancestor
-    pub fn has_ancestor(&self, ancestor: &str) -> bool {
-        self.ancestors.iter().any(|a| a == ancestor)
-    }
-}
 
 /// Asset data structure compatible with unreal_asset
 /// 
@@ -6524,6 +6829,21 @@ impl AdvancedAssetProcessing for Asset {
 pub struct Asset<C = std::io::Cursor<Vec<u8>>> {
     /// Asset data containing all package information
     pub asset_data: AssetData,
+    
+    // Stove compatibility fields (aliases to asset_data)
+    /// Name map - compatibility alias to asset_data.name_map
+    #[serde(skip)]
+    pub name_map: NameMap,
+    /// Import map - compatibility alias to asset_data.imports
+    #[serde(skip)]  
+    pub import_map: Vec<Import>,
+    /// Export map - compatibility alias to asset_data.exports
+    #[serde(skip)]
+    pub export_map: Vec<Export>,
+    /// Package summary - generated from asset_data
+    #[serde(skip)]
+    pub package_summary: PackageSummary,
+    
     /// Legacy file version
     pub legacy_file_version: i32,
     /// Asset info string
@@ -6641,8 +6961,15 @@ impl<C: Read + Seek> Asset<C> {
             }
         }
         
-        Ok(Asset {
+        let default_summary = PackageSummary::from_asset_data(&asset_data_struct);
+        
+        let mut asset = Asset {
             asset_data: asset_data_struct,
+            // Compatibility fields
+            name_map: vec![],
+            import_map: vec![],
+            export_map: vec![],
+            package_summary: default_summary,
             legacy_file_version: -4,
             info: "Loaded with CUE4Parse Rust compatibility layer".to_string(),
             generations: Vec::new(),
@@ -6662,13 +6989,21 @@ impl<C: Read + Seek> Asset<C> {
             object_version_ue5: ObjectVersionUE5::new(0),
             mappings: usmap,
             _phantom: std::marker::PhantomData,
-        })
+        };
+        asset.sync_compatibility_fields();
+        Ok(asset)
     }
     
     /// Create an empty Asset (for building assets from scratch)
     pub fn new_empty() -> Self {
+        let asset_data = AssetData::new();
+        
         Self {
-            asset_data: AssetData::new(),
+            name_map: asset_data.name_map.clone(),
+            import_map: asset_data.imports.clone(),
+            export_map: asset_data.exports.clone(),
+            package_summary: PackageSummary::from_asset_data(&asset_data),
+            asset_data,
             legacy_file_version: -4,
             info: "Empty asset created with CUE4Parse Rust".to_string(),
             generations: Vec::new(),
@@ -6714,6 +7049,16 @@ impl<C: Read + Seek> Asset<C> {
     /// Rebuild name map
     pub fn rebuild_name_map(&mut self) {
         self.asset_data.rebuild_name_map();
+        self.sync_compatibility_fields();
+    }
+    
+    /// Synchronize compatibility fields with asset_data
+    /// This keeps the alias fields (name_map, import_map, export_map, package_summary) in sync
+    pub fn sync_compatibility_fields(&mut self) {
+        self.name_map = self.asset_data.name_map.clone();
+        self.import_map = self.asset_data.imports.clone();
+        self.export_map = self.asset_data.exports.clone();
+        self.package_summary = PackageSummary::from_asset_data(&self.asset_data);
     }
     
     /// Write asset data to writers (binary format compatibility)
@@ -7140,6 +7485,10 @@ pub fn read<C: Read + Seek>(
     };
     
     Ok(Asset {
+        name_map: asset_data_struct.name_map.clone(),
+        import_map: asset_data_struct.imports.clone(),
+        export_map: asset_data_struct.exports.clone(),
+        package_summary: PackageSummary::from_asset_data(&asset_data_struct),
         asset_data: asset_data_struct,
         legacy_file_version,
         info: "Loaded with CUE4Parse Rust compatibility layer".to_string(),
@@ -7171,6 +7520,13 @@ impl Asset<std::io::Cursor<Vec<u8>>> {
     /// This provides an easy way to create Asset instances for compatibility
     /// with code that doesn't use the generic reader parameter.
     pub fn simple() -> Self {
+        Self::new_empty()
+    }
+    
+    /// Create a new Asset (original unreal_asset compatibility)
+    /// 
+    /// This is the standard constructor that Stove expects from the original unreal_asset library.
+    pub fn new_default() -> Self {
         Self::new_empty()
     }
 }
@@ -7259,18 +7615,30 @@ impl<C: Read + Seek> UnrealAssetCompat for Asset<C> {
         // Load asset data using the AssetData implementation
         let asset_data = AssetData::from_cue4parse(provider, object_path)?;
         
-        Ok(Asset {
+        // Extract needed values before moving asset_data
+        let package_guid = asset_data.package_guid.unwrap_or_else(|| Uuid::new_v4());
+        let use_event_driven_loader = asset_data.use_event_driven_loader;
+        let bulk_data_start_offset = asset_data.bulk_data_start_offset as i64;
+        
+        let mut asset = Asset {
+            // Compatibility fields
+            name_map: asset_data.name_map.clone(),
+            import_map: asset_data.imports.clone(),
+            export_map: asset_data.exports.clone(),
+            package_summary: PackageSummary::from_asset_data(&asset_data),
+            // Main fields
+            asset_data,
             legacy_file_version: -4,
             info: "Loaded via CUE4Parse Rust compatibility layer".to_string(),
             generations: Vec::new(),
-            package_guid: asset_data.package_guid.unwrap_or_else(|| Uuid::new_v4()),
+            package_guid,
             engine_version_recorded: EngineVersion::VER_UE5_3, // Default, could be parsed from asset_data
             engine_version_compatible: EngineVersion::VER_UE5_3,
             chunk_ids: Vec::new(),
             package_source: 0,
             folder_name: String::new(),
-            use_event_driven_loader: asset_data.use_event_driven_loader,
-            bulk_data_start_offset: asset_data.bulk_data_start_offset as i64,
+            use_event_driven_loader,
+            bulk_data_start_offset,
             world_tile_info: None,
             depends_map: None,
             soft_package_reference_list: None,
@@ -7278,9 +7646,10 @@ impl<C: Read + Seek> UnrealAssetCompat for Asset<C> {
             asset_tags: HashMap::new(),
             object_version_ue5: ObjectVersionUE5(0),
             mappings: None,
-            asset_data,
             _phantom: std::marker::PhantomData,
-        })
+        };
+        asset.sync_compatibility_fields();
+        Ok(asset)
     }
 }
 
