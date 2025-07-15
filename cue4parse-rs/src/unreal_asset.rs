@@ -40,6 +40,10 @@ use uuid::Uuid;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+// Add chrono for DateTime support
+#[cfg(feature = "unrealmodding-compat")]
+use chrono::{DateTime, Utc};
+
 // Conditional serde_json import for JSON handling
 #[cfg(feature = "unrealmodding-compat")]
 use serde_json;
@@ -216,34 +220,37 @@ pub mod containers {
 /// Positive values reference exports, negative values reference imports.
 #[cfg(feature = "unrealmodding-compat")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PackageIndex(pub i32);
+pub struct PackageIndex {
+    /// The raw index value for Stove compatibility
+    pub index: i32,
+}
 
 #[cfg(feature = "unrealmodding-compat")]
 impl PackageIndex {
     /// Create a null package index
     pub const fn null() -> Self {
-        PackageIndex(0)
+        PackageIndex { index: 0 }
     }
     
     /// Check if this is a null reference
     pub fn is_null(&self) -> bool {
-        self.0 == 0
+        self.index == 0
     }
     
     /// Check if this references an import (negative value)
     pub fn is_import(&self) -> bool {
-        self.0 < 0
+        self.index < 0
     }
     
     /// Check if this references an export (positive value)
     pub fn is_export(&self) -> bool {
-        self.0 > 0
+        self.index > 0
     }
     
     /// Get import index (converts from negative package index)
     pub fn import_index(&self) -> Option<usize> {
         if self.is_import() {
-            Some((-self.0 - 1) as usize)
+            Some((-self.index - 1) as usize)
         } else {
             None
         }
@@ -252,7 +259,7 @@ impl PackageIndex {
     /// Get export index (converts from positive package index)
     pub fn export_index(&self) -> Option<usize> {
         if self.is_export() {
-            Some((self.0 - 1) as usize)
+            Some((self.index - 1) as usize)
         } else {
             None
         }
@@ -260,22 +267,17 @@ impl PackageIndex {
     
     /// Create from import index
     pub fn from_import(index: usize) -> Self {
-        PackageIndex(-(index as i32) - 1)
+        PackageIndex { index: -(index as i32) - 1 }
     }
     
     /// Create from export index
     pub fn from_export(index: usize) -> Self {
-        PackageIndex((index as i32) + 1)
+        PackageIndex { index: (index as i32) + 1 }
     }
     
     /// Stove compatibility: Create a new PackageIndex (alias for from_export)
     pub fn new(index: i32) -> Self {
-        PackageIndex(index)
-    }
-    
-    /// Stove compatibility: Get the raw index value (alias for .0)
-    pub fn index(&self) -> i32 {
-        self.0
+        PackageIndex { index }
     }
 }
 
@@ -297,7 +299,7 @@ pub trait PackageIndexTrait {
 
 #[cfg(feature = "unrealmodding-compat")]
 impl PackageIndexTrait for PackageIndex {
-    fn get_index(&self) -> i32 { self.0 }
+    fn get_index(&self) -> i32 { self.index }
     fn is_null(&self) -> bool { PackageIndex::is_null(self) }
     fn is_import(&self) -> bool { PackageIndex::is_import(self) }
     fn is_export(&self) -> bool { PackageIndex::is_export(self) }
@@ -2809,23 +2811,29 @@ pub struct FName {
     pub name: String,
     /// Optional numeric suffix for duplicate names
     pub number: u32,
+    /// Display name for Stove compatibility
+    pub display_name: String,
 }
 
 #[cfg(feature = "unrealmodding-compat")]
 impl FName {
     /// Create a new FName from a string
     pub fn new(name: impl Into<String>) -> Self {
+        let name_str = name.into();
         Self {
-            name: name.into(),
+            name: name_str.clone(),
             number: 0,
+            display_name: name_str,
         }
     }
     
     /// Create an FName with a specific number suffix
     pub fn with_number(name: impl Into<String>, number: u32) -> Self {
+        let name_str = name.into();
         Self {
-            name: name.into(),
+            name: name_str.clone(),
             number,
+            display_name: name_str,
         }
     }
     
@@ -3121,14 +3129,24 @@ impl Transform {
 pub struct SoftObjectPath {
     pub asset_path: FName,
     pub sub_path: String,
+    /// Combined value for Stove compatibility
+    pub value: String,
 }
 
 #[cfg(feature = "unrealmodding-compat")]
 impl SoftObjectPath {
     pub fn new(asset_path: impl Into<String>, sub_path: impl Into<String>) -> Self {
+        let asset_path_str = asset_path.into();
+        let sub_path_str = sub_path.into();
+        let value = if sub_path_str.is_empty() {
+            asset_path_str.clone()
+        } else {
+            format!("{}:{}", asset_path_str, sub_path_str)
+        };
         Self {
-            asset_path: FName::new(asset_path),
-            sub_path: sub_path.into(),
+            asset_path: FName::new(asset_path_str),
+            sub_path: sub_path_str,
+            value,
         }
     }
     
@@ -3192,7 +3210,7 @@ pub struct EnumProperty {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BytePropertyValue {
     /// Regular byte value
-    Byte(u8),
+    Byte(&'static mut u8),
     /// Enum byte value
     Enum {
         enum_type: FName,
@@ -3251,39 +3269,15 @@ pub enum Property {
     /// Object reference property
     Object(Option<PackageIndex>),
     /// Struct property containing nested properties
-    Struct {
-        /// Name of the struct type
-        struct_type: FName,
-        /// Nested properties
-        properties: IndexMap<String, Property>,
-    },
+    Struct(IndexMap<String, Property>),
     /// Array of properties
     Array(Vec<Property>),
     /// Map of key-value pairs
-    Map {
-        /// Map key type
-        key_type: String,
-        /// Map value type  
-        value_type: String,
-        /// Map entries
-        entries: Vec<(Property, Property)>,
-    },
+    Map(Vec<(Property, Property)>),
     /// Enum property
-    Enum {
-        /// Enum type name
-        enum_type: FName,
-        /// Selected enum value
-        value: FName,
-    },
-    /// Text property (localized string)
-    Text {
-        /// Text content
-        text: String,
-        /// Text namespace
-        namespace: Option<String>,
-        /// Text key
-        key: Option<String>,
-    },
+    Enum(FName),
+    /// Text property (localized string) 
+    Text(String),
     
     // Advanced property types required by Stove and other tools
     
@@ -3324,17 +3318,9 @@ pub enum Property {
     /// TimeSpan property (duration in ticks)
     TimeSpan(i64),
     /// Delegate property
-    Delegate {
-        /// Delegate object reference
-        object: Option<PackageIndex>,
-        /// Function name
-        function_name: FName,
-    },
+    Delegate(FName),
     /// Multicast delegate property
-    MulticastDelegate {
-        /// Array of delegates
-        delegates: Vec<Property>, // Each is a Delegate property
-    },
+    MulticastDelegate(Vec<Property>),
     
     // Material and mesh specific properties
     /// Material interface property
@@ -3396,30 +3382,23 @@ pub enum Property {
     /// Smart name property
     SmartNameProperty(FName),
     /// Struct property (alias for Struct)
-    StructProperty {
-        /// Name of the struct type
-        struct_type: FName,
-        /// Nested properties
-        properties: IndexMap<String, Property>,
-    },
+    StructProperty(IndexMap<String, Property>),
     /// Enum property (alias for Enum)
-    EnumProperty {
-        /// Enum type name
-        enum_type: FName,
-        /// Selected enum value
-        value: FName,
-    },
+    EnumProperty(FName),
     /// Array property (alias for Array)
     ArrayProperty(Vec<Property>),
     /// Map property (alias for Map)
-    MapProperty {
-        /// Map key type
-        key_type: String,
-        /// Map value type  
-        value_type: String,
-        /// Map entries
-        entries: Vec<(Property, Property)>,
-    },
+    MapProperty(Vec<(Property, Property)>),
+    /// DateTime property
+    DateTimeProperty(i64),
+    /// Guid property
+    GuidProperty([u32; 4]),
+    /// Per-platform bool property
+    PerPlatformBoolProperty(bool),
+    /// Per-platform int property
+    PerPlatformIntProperty(i32),
+    /// Per-platform float property
+    PerPlatformFloatProperty(f32),
     /// Set property (alias for Set)
     SetProperty(Vec<Property>),
     /// Object property (alias for Object)
@@ -3474,13 +3453,12 @@ impl PropertyDataTrait for Property {
             Property::Double(_) => "DoubleProperty",
             Property::String(_) => "StrProperty",
             Property::Name(_) => "NameProperty",
-            Property::Text { .. } => "TextProperty",
             Property::Object(_) => "ObjectProperty",
-            Property::Struct { .. } => "StructProperty",
+            Property::Struct(_) => "StructProperty",
             Property::Array(_) => "ArrayProperty",
-            Property::Map { .. } => "MapProperty",
+            Property::Map(_) => "MapProperty",
             Property::Set(_) => "SetProperty",
-            Property::Enum { .. } => "EnumProperty",
+            Property::Enum(_) => "EnumProperty",
             Property::Vector(_) => "VectorProperty",
             Property::Vector4(_) => "Vector4Property",
             Property::Vector2D(_) => "Vector2DProperty",
@@ -3497,8 +3475,8 @@ impl PropertyDataTrait for Property {
             Property::Guid(_) => "GuidProperty",
             Property::DateTime(_) => "DateTimeProperty",
             Property::TimeSpan(_) => "TimeSpanProperty",
-            Property::Delegate { .. } => "DelegateProperty",
-            Property::MulticastDelegate { .. } => "MulticastDelegateProperty",
+            Property::Delegate(_) => "DelegateProperty",
+            Property::MulticastDelegate(_) => "MulticastDelegateProperty",
             Property::MaterialInterface(_) => "MaterialInterfaceProperty",
             Property::StaticMesh(_) => "StaticMeshProperty",
             Property::SkeletalMesh(_) => "SkeletalMeshProperty",
@@ -3509,29 +3487,30 @@ impl PropertyDataTrait for Property {
             Property::Blueprint(_) => "BlueprintProperty",
             Property::WorldContext(_) => "WorldContextProperty",
             Property::LandscapeComponent(_) => "LandscapeComponentProperty",
-            
             Property::ByteEnum { .. } => "ByteProperty",
             Property::Byte(_) => "ByteProperty",
-            
-            // Missing Stove-specific property variants
             Property::WeightedRandomSamplerProperty(_) => "WeightedRandomSamplerProperty",
             Property::SkeletalMeshSamplingLODBuiltDataProperty(_) => "SkeletalMeshSamplingLODBuiltDataProperty",
             Property::SkeletalMeshAreaWeightedTriangleSampler(_) => "SkeletalMeshAreaWeightedTriangleSampler",
             Property::SoftAssetPathProperty(_) => "SoftAssetPathProperty",
             Property::SoftObjectPathProperty(_) => "SoftObjectPathProperty",
             Property::SoftClassPathProperty(_) => "SoftClassPathProperty",
-            Property::DelegateProperty { .. } => "DelegateProperty",
-            Property::MulticastDelegateProperty { .. } => "MulticastDelegateProperty",
-            Property::MulticastSparseDelegateProperty { .. } => "MulticastSparseDelegateProperty",
-            Property::MulticastInlineDelegateProperty { .. } => "MulticastInlineDelegateProperty",
+            Property::DelegateProperty(_) => "DelegateProperty",
+            Property::MulticastDelegateProperty(_) => "MulticastDelegateProperty",
+            Property::MulticastSparseDelegateProperty(_) => "MulticastSparseDelegateProperty",
+            Property::MulticastInlineDelegateProperty(_) => "MulticastInlineDelegateProperty",
             Property::SmartNameProperty(_) => "SmartNameProperty",
-            Property::StructProperty { .. } => "StructProperty",
-            Property::EnumProperty { .. } => "EnumProperty",
+            Property::StructProperty(_) => "StructProperty",
+            Property::EnumProperty(_) => "EnumProperty",
             Property::ArrayProperty(_) => "ArrayProperty",
-            Property::MapProperty { .. } => "MapProperty",
+            Property::MapProperty(_) => "MapProperty",
             Property::SetProperty(_) => "SetProperty",
             Property::ObjectProperty(_) => "ObjectProperty",
-            
+            Property::DateTimeProperty(_) => "DateTimeProperty",
+            Property::GuidProperty(_) => "GuidProperty",
+            Property::PerPlatformBoolProperty(_) => "PerPlatformBoolProperty",
+            Property::PerPlatformIntProperty(_) => "PerPlatformIntProperty",
+            Property::PerPlatformFloatProperty(_) => "PerPlatformFloatProperty",
             Property::Unknown(_) => "Unknown",
         }
     }
@@ -3610,38 +3589,33 @@ impl PropertyDataTrait for Property {
                 "AssetPath": path.asset_path.to_serialized_name(),
                 "SubPath": path.sub_path
             }),
-            Property::DelegateProperty { object, function_name } => serde_json::json!({
-                "Object": object.map(|o| o.0),
-                "FunctionName": function_name.to_serialized_name()
+            Property::DelegateProperty(delegate) => serde_json::json!({
+                "Delegate": delegate.to_json()
             }),
-            Property::MulticastDelegateProperty { delegates } => serde_json::json!({
+            Property::MulticastDelegateProperty(delegates) => serde_json::json!({
                 "Delegates": delegates.iter().map(|d| d.to_json()).collect::<Vec<_>>()
             }),
-            Property::MulticastSparseDelegateProperty { delegates } => serde_json::json!({
+            Property::MulticastSparseDelegateProperty(delegates) => serde_json::json!({
                 "Delegates": delegates.iter().map(|d| d.to_json()).collect::<Vec<_>>()
             }),
-            Property::MulticastInlineDelegateProperty { delegates } => serde_json::json!({
+            Property::MulticastInlineDelegateProperty(delegates) => serde_json::json!({
                 "Delegates": delegates.iter().map(|d| d.to_json()).collect::<Vec<_>>()
             }),
             Property::SmartNameProperty(name) => serde_json::Value::String(name.to_serialized_name()),
-            Property::StructProperty { struct_type, properties } => {
+            Property::StructProperty(properties) => {
                 let mut obj = serde_json::Map::new();
-                obj.insert("StructType".to_string(), serde_json::Value::String(struct_type.to_serialized_name()));
                 for (key, value) in properties {
                     obj.insert(key.clone(), value.to_json());
                 }
                 serde_json::Value::Object(obj)
             },
-            Property::EnumProperty { enum_type, value } => serde_json::json!({
-                "EnumType": enum_type.to_serialized_name(),
-                "Value": value.to_serialized_name()
+            Property::EnumProperty(enum_type) => serde_json::json!({
+                "EnumType": enum_type.to_serialized_name()
             }),
             Property::ArrayProperty(array) => serde_json::Value::Array(
                 array.iter().map(|p| p.to_json()).collect()
             ),
-            Property::MapProperty { key_type, value_type, entries } => serde_json::json!({
-                "KeyType": key_type,
-                "ValueType": value_type,
+            Property::MapProperty(entries) => serde_json::json!({
                 "Entries": entries.iter().map(|(k, v)| serde_json::json!({
                     "Key": k.to_json(),
                     "Value": v.to_json()
@@ -7771,6 +7745,15 @@ pub fn get_version_info<C>(asset: &Asset<C>) -> VersionInfo {
 }
 
 impl<C> Asset<C> {
+    /// Add a name to the asset's name map (Stove compatibility)
+    pub fn add_fname(&mut self, name: String) {
+        self.name_map.push(name);
+    }
+
+    /// Get the engine version recorded in the asset (Stove compatibility)
+    pub fn get_engine_version(&self) -> EngineVersion {
+        self.engine_version_recorded
+    }
     /// Get object version
     pub fn get_object_version(&self) -> i32 {
         // Convert engine version to object version approximation
