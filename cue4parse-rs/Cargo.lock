@@ -293,6 +293,7 @@ dependencies = [
  "libc",
  "lru",
  "netcorehost",
+ "once_cell",
  "serde",
  "serde_json",
  "tempfile",
