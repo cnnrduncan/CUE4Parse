@@ -267,6 +267,16 @@ impl PackageIndex {
     pub fn from_export(index: usize) -> Self {
         PackageIndex((index as i32) + 1)
     }
+    
+    /// Stove compatibility: Create a new PackageIndex (alias for from_export)
+    pub fn new(index: i32) -> Self {
+        PackageIndex(index)
+    }
+    
+    /// Stove compatibility: Get the raw index value (alias for .0)
+    pub fn index(&self) -> i32 {
+        self.0
+    }
 }
 
 /// Trait for types that can work with PackageIndex
@@ -2576,9 +2586,14 @@ pub enum Error {
 
 #[cfg(feature = "unrealmodding-compat")]
 impl Error {
-    /// Create a NoData error
+    /// Create a NoData error (Stove compatibility)
     pub fn no_data() -> Self {
         Error::NoData
+    }
+    
+    /// Create an invalid package index error (Stove compatibility)
+    pub fn invalid_package_index(index: i32) -> Self {
+        Error::InvalidIndex(index)
     }
 }
 
@@ -2593,6 +2608,20 @@ impl From<Error> for UnrealAssetError {
             Error::Serialization(s) => UnrealAssetError::Parse(s),
             Error::CUE4Parse(s) => UnrealAssetError::Custom(s),
             Error::InvalidData(s) => UnrealAssetError::Custom(format!("Invalid data: {}", s)),
+        }
+    }
+}
+
+#[cfg(feature = "unrealmodding-compat")]
+impl From<UnrealAssetError> for Error {
+    fn from(err: UnrealAssetError) -> Self {
+        match err {
+            UnrealAssetError::Custom(msg) => Error::CUE4Parse(msg),
+            UnrealAssetError::InvalidIndex(msg) => Error::InvalidData(msg),
+            UnrealAssetError::Io(e) => Error::Io(e),
+            UnrealAssetError::Parse(s) => Error::Serialization(s),
+            UnrealAssetError::InvalidData(s) => Error::Serialization(s),
+            UnrealAssetError::UnsupportedVersion(s) => Error::Serialization(s),
         }
     }
 }
@@ -2732,6 +2761,10 @@ impl ObjectVersion {
     pub fn get(&self) -> i32 {
         self.0
     }
+
+    // Stove compatibility constants
+    pub const VER_UE4_STATIC_MESH_STORE_NAV_COLLISION: i32 = 1_000_000;
+    // Add other missing constants here as needed
 }
 
 // ============================================================================
@@ -3162,6 +3195,8 @@ pub enum BytePropertyValue {
         enum_type: FName,
         value: FName,
     },
+    /// FName variant for Stove compatibility
+    FName(FName),
 }
 
 /// Vector property for original unreal_asset compatibility
@@ -3318,21 +3353,90 @@ pub enum Property {
         value: FName,
     },
     /// Raw byte property
-    Byte(u8),        /// Material instances with parameters
-        MaterialInstance(HashMap<String, Property>),
-        /// Level sequence property
-        LevelSequence(Option<PackageIndex>),
-        /// Component reference property
-        ComponentReference(Option<PackageIndex>),
-        /// Blueprint property
-        Blueprint(Option<PackageIndex>),
-        /// World context property
-        WorldContext(Option<PackageIndex>),
-        /// Landscape component property
-        LandscapeComponent(Option<PackageIndex>),
-        
-        /// Unknown or unsupported property type
-        Unknown(serde_json::Value),
+    Byte(u8),
+    
+    // Missing Stove-specific property variants
+    /// Weighted random sampler property
+    WeightedRandomSamplerProperty(serde_json::Value),
+    /// Skeletal mesh sampling LOD built data property
+    SkeletalMeshSamplingLODBuiltDataProperty(serde_json::Value),
+    /// Skeletal mesh area weighted triangle sampler
+    SkeletalMeshAreaWeightedTriangleSampler(serde_json::Value),
+    /// Soft asset path property (alias for SoftObjectPath)
+    SoftAssetPathProperty(SoftObjectPath),
+    /// Soft object path property (alias for SoftObjectPath)
+    SoftObjectPathProperty(SoftObjectPath),
+    /// Soft class path property (alias for SoftClassPath)
+    SoftClassPathProperty(SoftObjectPath),
+    /// Delegate property (alias for Delegate)
+    DelegateProperty {
+        /// Delegate object reference
+        object: Option<PackageIndex>,
+        /// Function name
+        function_name: FName,
+    },
+    /// Multicast delegate property (alias for MulticastDelegate)
+    MulticastDelegateProperty {
+        /// Array of delegates
+        delegates: Vec<Property>,
+    },
+    /// Multicast sparse delegate property
+    MulticastSparseDelegateProperty {
+        /// Array of delegates
+        delegates: Vec<Property>,
+    },
+    /// Multicast inline delegate property
+    MulticastInlineDelegateProperty {
+        /// Array of delegates
+        delegates: Vec<Property>,
+    },
+    /// Smart name property
+    SmartNameProperty(FName),
+    /// Struct property (alias for Struct)
+    StructProperty {
+        /// Name of the struct type
+        struct_type: FName,
+        /// Nested properties
+        properties: IndexMap<String, Property>,
+    },
+    /// Enum property (alias for Enum)
+    EnumProperty {
+        /// Enum type name
+        enum_type: FName,
+        /// Selected enum value
+        value: FName,
+    },
+    /// Array property (alias for Array)
+    ArrayProperty(Vec<Property>),
+    /// Map property (alias for Map)
+    MapProperty {
+        /// Map key type
+        key_type: String,
+        /// Map value type  
+        value_type: String,
+        /// Map entries
+        entries: Vec<(Property, Property)>,
+    },
+    /// Set property (alias for Set)
+    SetProperty(Vec<Property>),
+    /// Object property (alias for Object)
+    ObjectProperty(Option<PackageIndex>),
+    
+    /// Material instances with parameters
+    MaterialInstance(HashMap<String, Property>),
+    /// Level sequence property
+    LevelSequence(Option<PackageIndex>),
+    /// Component reference property
+    ComponentReference(Option<PackageIndex>),
+    /// Blueprint property
+    Blueprint(Option<PackageIndex>),
+    /// World context property
+    WorldContext(Option<PackageIndex>),
+    /// Landscape component property
+    LandscapeComponent(Option<PackageIndex>),
+    
+    /// Unknown or unsupported property type
+    Unknown(serde_json::Value),
 }
 
 // ============================================================================
@@ -3405,6 +3509,26 @@ impl PropertyDataTrait for Property {
             
             Property::ByteEnum { .. } => "ByteProperty",
             Property::Byte(_) => "ByteProperty",
+            
+            // Missing Stove-specific property variants
+            Property::WeightedRandomSamplerProperty(_) => "WeightedRandomSamplerProperty",
+            Property::SkeletalMeshSamplingLODBuiltDataProperty(_) => "SkeletalMeshSamplingLODBuiltDataProperty",
+            Property::SkeletalMeshAreaWeightedTriangleSampler(_) => "SkeletalMeshAreaWeightedTriangleSampler",
+            Property::SoftAssetPathProperty(_) => "SoftAssetPathProperty",
+            Property::SoftObjectPathProperty(_) => "SoftObjectPathProperty",
+            Property::SoftClassPathProperty(_) => "SoftClassPathProperty",
+            Property::DelegateProperty { .. } => "DelegateProperty",
+            Property::MulticastDelegateProperty { .. } => "MulticastDelegateProperty",
+            Property::MulticastSparseDelegateProperty { .. } => "MulticastSparseDelegateProperty",
+            Property::MulticastInlineDelegateProperty { .. } => "MulticastInlineDelegateProperty",
+            Property::SmartNameProperty(_) => "SmartNameProperty",
+            Property::StructProperty { .. } => "StructProperty",
+            Property::EnumProperty { .. } => "EnumProperty",
+            Property::ArrayProperty(_) => "ArrayProperty",
+            Property::MapProperty { .. } => "MapProperty",
+            Property::SetProperty(_) => "SetProperty",
+            Property::ObjectProperty(_) => "ObjectProperty",
+            
             Property::Unknown(_) => "Unknown",
         }
     }
@@ -3466,6 +3590,67 @@ impl PropertyDataTrait for Property {
                 "AssetPath": path.asset_path.to_serialized_name(),
                 "SubPath": path.sub_path
             }),
+            
+            // Handle new Stove-specific property variants
+            Property::WeightedRandomSamplerProperty(v) => v.clone(),
+            Property::SkeletalMeshSamplingLODBuiltDataProperty(v) => v.clone(),
+            Property::SkeletalMeshAreaWeightedTriangleSampler(v) => v.clone(),
+            Property::SoftAssetPathProperty(path) => serde_json::json!({
+                "AssetPath": path.asset_path.to_serialized_name(),
+                "SubPath": path.sub_path
+            }),
+            Property::SoftObjectPathProperty(path) => serde_json::json!({
+                "AssetPath": path.asset_path.to_serialized_name(),
+                "SubPath": path.sub_path
+            }),
+            Property::SoftClassPathProperty(path) => serde_json::json!({
+                "AssetPath": path.asset_path.to_serialized_name(),
+                "SubPath": path.sub_path
+            }),
+            Property::DelegateProperty { object, function_name } => serde_json::json!({
+                "Object": object.map(|o| o.0),
+                "FunctionName": function_name.to_serialized_name()
+            }),
+            Property::MulticastDelegateProperty { delegates } => serde_json::json!({
+                "Delegates": delegates.iter().map(|d| d.to_json()).collect::<Vec<_>>()
+            }),
+            Property::MulticastSparseDelegateProperty { delegates } => serde_json::json!({
+                "Delegates": delegates.iter().map(|d| d.to_json()).collect::<Vec<_>>()
+            }),
+            Property::MulticastInlineDelegateProperty { delegates } => serde_json::json!({
+                "Delegates": delegates.iter().map(|d| d.to_json()).collect::<Vec<_>>()
+            }),
+            Property::SmartNameProperty(name) => serde_json::Value::String(name.to_serialized_name()),
+            Property::StructProperty { struct_type, properties } => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("StructType".to_string(), serde_json::Value::String(struct_type.to_serialized_name()));
+                for (key, value) in properties {
+                    obj.insert(key.clone(), value.to_json());
+                }
+                serde_json::Value::Object(obj)
+            },
+            Property::EnumProperty { enum_type, value } => serde_json::json!({
+                "EnumType": enum_type.to_serialized_name(),
+                "Value": value.to_serialized_name()
+            }),
+            Property::ArrayProperty(array) => serde_json::Value::Array(
+                array.iter().map(|p| p.to_json()).collect()
+            ),
+            Property::MapProperty { key_type, value_type, entries } => serde_json::json!({
+                "KeyType": key_type,
+                "ValueType": value_type,
+                "Entries": entries.iter().map(|(k, v)| serde_json::json!({
+                    "Key": k.to_json(),
+                    "Value": v.to_json()
+                })).collect::<Vec<_>>()
+            }),
+            Property::SetProperty(set) => serde_json::Value::Array(
+                set.iter().map(|p| p.to_json()).collect()
+            ),
+            Property::ObjectProperty(obj) => match obj {
+                Some(index) => serde_json::Value::Number(index.0.into()),
+                None => serde_json::Value::Null,
+            },
             
             Property::Unknown(v) => v.clone(),
             _ => serde_json::Value::Null,

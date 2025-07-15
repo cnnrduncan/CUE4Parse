@@ -1,0 +1,85 @@
+# Stove Compatibility Fixes for cue4parse-rs unrealasset_compat
+
+## 1. Fix From implementation typo
+Line 2597: `impl From<e> for UnrealAssetError {` -> `impl From<Error> for UnrealAssetError {`
+
+## 2. Add missing Error methods
+After line 2593, add:
+```rust
+/// Create an invalid package index error (Stove compatibility)
+pub fn invalid_package_index(index: i32) -> Self {
+    Error::InvalidIndex(index)
+}
+```
+
+## 3. Add missing SoftObjectPath.value field compatibility
+In SoftObjectPath impl block, add:
+```rust
+/// Stove compatibility: Get combined value (asset_path + sub_path)
+pub fn value(&self) -> String {
+    if self.sub_path.is_empty() {
+        self.asset_path.to_serialized_name()
+    } else {
+        format!("{}:{}", self.asset_path.to_serialized_name(), self.sub_path)
+    }
+}
+```
+
+## 4. Add Asset.get_engine_version() method
+In Asset impl block:
+```rust
+/// Stove compatibility: Get engine version
+pub fn get_engine_version(&self) -> EngineVersion {
+    self.engine_version_recorded
+}
+
+/// Stove compatibility: Add FName to asset's name map
+pub fn add_fname(&mut self, name: String) -> FName {
+    let index = self.asset_data.name_map.len();
+    self.asset_data.name_map.push(name.clone());
+    self.sync_compatibility_fields();
+    FName { name, number: 0 }
+}
+
+/// Stove compatibility: Get asset imports (alias)
+pub fn imports(&self) -> &[Import] {
+    &self.asset_data.imports
+}
+```
+
+## 5. Add FName::default()
+In FName impl block:
+```rust
+impl Default for FName {
+    fn default() -> Self {
+        FName { name: "None".to_string(), number: 0 }
+    }
+}
+```
+
+## 6. Add BytePropertyValue::FName variant
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BytePropertyValue {
+    Byte(u8),
+    FName(FName),
+}
+```
+
+## 7. Add missing ObjectVersion constants
+In EngineVersion enum:
+```rust
+/// Static mesh store nav collision constant
+VER_UE4_STATIC_MESH_STORE_NAV_COLLISION = 504,
+```
+
+## 8. Add get_custom_version method
+In Asset impl:
+```rust
+/// Get custom version by GUID
+pub fn get_custom_version(&self, guid: &Uuid) -> Option<&CustomVersion> {
+    self.custom_versions.iter().find(|v| v.guid == *guid)
+}
+```
+
+These fixes address the major compatibility gaps identified for Stove integration.
